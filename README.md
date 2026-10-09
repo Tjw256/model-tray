@@ -88,7 +88,7 @@ Ollama and plain llama.cpp ran at about the same speed. The gain comes from sett
 
 1. Click **Connect OpenCode (T3 Code)** in the tray menu, or run `LocalQwenTray.exe --connect-opencode`. This adds a `local-qwen` provider to `~/.config/opencode/opencode.json` (with the endpoint, key, vision, reasoning, tool calls and context limit) and keeps every other provider; the original file is backed up once as `opencode.json.before-local-qwen`. A config with comments is never rewritten. The tray keeps the context limit in step with what is actually loaded.
 2. In **T3 Code → Add provider instance → OpenCode**, set **Binary path** to `opencode` and leave **Server URL** and **Server password empty**, so T3 starts OpenCode itself. (Server URL is the address of an *OpenCode server*, not of the model.)
-3. Pick the model `local-qwen/qwen3.8-27b-uncensored-q5_k_m`.
+3. Pick the model `local-qwen/qwen3.8-27b-uncensored-q5_k_m`, or the `local-qwen` agent. That agent edits files in the project without asking, but must ask you before running a command or using the web (a shell can reach outside the project folder), and it may not touch files outside the project.
 
 ## Use Qwen as a sub-agent (MCP)
 
@@ -96,21 +96,24 @@ Ollama and plain llama.cpp ran at about the same speed. The gain comes from sett
 
 - `ask_local_qwen(prompt, system?, reasoning?, max_tokens?)`: drafts, summaries, rewrites, simple code, second opinions. `reasoning` is `off` / `low` / `medium` / `xhigh`.
 - `ask_local_qwen_about_image(image_path, prompt, ...)`: vision questions about a local image file.
+- `run_local_qwen_agent(task, working_directory, check_command?, max_rounds?, timeout_minutes?)`: hands a whole chore to Qwen. It works as an agent in that folder and returns its summary plus the files it changed. With `check_command` (for example `python -m pytest -q`), the server runs that command after Qwen's edits and gives any failure back to Qwen for another round, up to `max_rounds` (default 3). It needs [OpenCode](https://opencode.ai) installed (`npm install -g opencode-ai`) and is meant for well-defined chores: fixing a failing test, adding tests, small refactors, bulk edits.
 - `local_qwen_status()`: whether the tray is reachable, plus model and context.
 
-Register it with your agent (use the full path to your published exe). The first call can take about 25 s while the model loads, so allow a generous tool timeout:
+**What the agent may do.** Qwen gets file tools only: read, search and edit inside `working_directory`. Shell commands, sub-agents, web access and other MCP servers are all denied. Edits outside the folder are refused. The policy is passed to OpenCode by the MCP server, and the project's own `opencode.json` is ignored, so Qwen cannot write itself a looser policy. Why no shell: a command allowlist is not a fence. When tested with `echo` blocked, Qwen wrote outside the folder with `python -c` instead. Commands are therefore chosen by the *calling* agent (`check_command`), not by Qwen. That command runs with your permissions and executes code Qwen may have just edited, so in projects you don't trust, review the diff before letting it run. This is a permission boundary inside OpenCode, not an OS sandbox.
+
+Register it with your agent (use the full path to your published exe). The first call can take about 25 s while the model loads, so allow a generous tool timeout (`run_local_qwen_agent` can take up to its `timeout_minutes`, 20 by default):
 
 - **Codex** (`~/.codex/config.toml`):
   ```toml
   [mcp_servers.local-qwen]
   command = 'C:\path\to\LocalQwenTray.exe'
   args = ["--mcp"]
-  tool_timeout_sec = 600
+  tool_timeout_sec = 1800
   ```
 - **Claude Code**: `claude mcp add local-qwen -- "C:\path\to\LocalQwenTray.exe" --mcp`
 - **OpenCode** (`opencode.json`): `"mcp": { "local-qwen": { "type": "local", "command": ["C:\path\to\LocalQwenTray.exe", "--mcp"] } }`
 
-Then tell the agent when to use it, for example: *"Use ask_local_qwen for first drafts and summaries."*
+Then tell the agent when to use it, for example: *"Use ask_local_qwen for first drafts and summaries. Hand small, well-defined code chores to run_local_qwen_agent with a check_command, then review its diff."*
 
 ## Configuration
 

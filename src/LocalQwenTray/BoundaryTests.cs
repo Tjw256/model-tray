@@ -180,11 +180,13 @@ internal static class BoundaryTests
         SelfTests.Check("two slots run with one shared KV pool", two.Contains("-np 2 --kv-unified") && argText.Contains("-np 1") && !argText.Contains("--kv-unified"));
         var ocDir=Path.Combine(Path.GetTempPath(),"localqwen-opencode-"+Guid.NewGuid()); Directory.CreateDirectory(ocDir);
         var oc=Path.Combine(ocDir,"opencode.json");
-        File.WriteAllText(oc,"{\"$schema\":\"https://opencode.ai/config.json\",\"provider\":{\"ollama\":{\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"baseURL\":\"http://127.0.0.1:11434/v1\"}}}}");
+        File.WriteAllText(oc,"{\"$schema\":\"https://opencode.ai/config.json\",\"provider\":{\"ollama\":{\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"baseURL\":\"http://127.0.0.1:11434/v1\"}}},\"agent\":{\"mine\":{\"mode\":\"subagent\"}}}");
         SelfTests.Check("OpenCode starts unconnected",!OpenCodeClient.IsConnected(oc));
         SelfTests.Check("connecting writes the local-qwen provider",OpenCodeClient.Connect("k-123",98304,oc) is null && OpenCodeClient.IsConnected(oc));
         var ocText=File.ReadAllText(oc);
-        SelfTests.Check("existing OpenCode providers are kept and a backup is made",ocText.Contains("11434") && ocText.Contains("\"apiKey\": \"k-123\"") && ocText.Contains("98304") && File.Exists(oc+".before-local-qwen"));
+        SelfTests.Check("existing OpenCode providers are kept and a backup is made",ocText.Contains("11434") && ocText.Contains("\"mine\"") && ocText.Contains("\"apiKey\": \"k-123\"") && ocText.Contains("98304") && File.Exists(oc+".before-local-qwen"));
+        SelfTests.Check("connecting adds the local-qwen agent: edits allowed, shell and web only after approval, nothing outside the folder",
+            ocText.Contains("\"external_directory\": \"deny\"") && ocText.Contains("\"bash\": \"ask\"") && ocText.Contains("\"webfetch\": \"ask\"") && ocText.Contains("\"edit\": \"allow\""));
         OpenCodeClient.UpdateContext(131072,oc);
         SelfTests.Check("OpenCode's context limit follows the loaded context",File.ReadAllText(oc).Contains("131072") && !File.ReadAllText(oc).Contains("98304"));
         File.WriteAllText(oc,"{ // my comment\n \"provider\": {} }");

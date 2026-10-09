@@ -7,11 +7,19 @@ namespace LocalQwenTray;
 internal static class OpenCodeClient
 {
     public const string ProviderId = "local-qwen";
+    public const string AgentId = "local-qwen";   // OpenCode agent for interactive use (T3 Code, opencode TUI)
     public const int OutputLimit = 32768;
     public static string Endpoint => $"http://127.0.0.1:{Policy.PublicPort}/v1";
     public static string ConfigPath => Environment.GetEnvironmentVariable("XDG_CONFIG_HOME") is { Length: > 0 } xdg
         ? Path.Combine(xdg, "opencode", "opencode.json")
         : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "opencode", "opencode.json");
+    // The real opencode.exe inside the npm package (calling it directly avoids the .cmd/.ps1 shims), else one on PATH.
+    public static string? Executable()
+    {
+        var npm = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "npm", "node_modules", "opencode-ai", "bin", "opencode.exe");
+        if (File.Exists(npm)) return npm;
+        return (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries).Select(d => Path.Combine(d.Trim(), "opencode.exe")).FirstOrDefault(File.Exists);
+    }
     public static bool Installed()
     {
         var npm = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "npm", "opencode.cmd");
@@ -37,25 +45,36 @@ internal static class OpenCodeClient
         var root = Read(path);
         if (root is null) return $"{path} is not plain JSON (comments?), so it was not changed. Add the \"{ProviderId}\" provider by hand (see README).";
         var providers = root["provider"] as JsonObject ?? (JsonObject)(root["provider"] = new JsonObject());
-        providers[ProviderId] = new JsonObject
+        providers[ProviderId] = ProviderEntry(apiKey, context);
+        // Agent for interactive use (T3 Code, opencode TUI): edits inside the folder; shell commands and web access need the
+        // user's approval, because a shell can reach outside the folder. Other agents are kept. (The MCP worker brings its own.)
+        var agents = root["agent"] as JsonObject ?? (JsonObject)(root["agent"] = new JsonObject());
+        agents[AgentId] = new JsonObject
         {
-            ["npm"] = "@ai-sdk/openai-compatible",
-            ["name"] = "Local Qwen (tray)",
-            ["options"] = new JsonObject { ["baseURL"] = Endpoint, ["apiKey"] = apiKey },
-            ["models"] = new JsonObject
-            {
-                [Policy.Model] = new JsonObject
-                {
-                    ["name"] = "Qwen3.8 27B (Local Qwen)",
-                    ["attachment"] = true, ["reasoning"] = true, ["tool_call"] = true, ["temperature"] = true,
-                    ["modalities"] = new JsonObject { ["input"] = new JsonArray("text", "image"), ["output"] = new JsonArray("text") },
-                    ["limit"] = new JsonObject { ["context"] = context, ["output"] = OutputLimit },
-                },
-            },
+            ["description"] = "Local Qwen3.8 27B: edits files in the project; asks before running commands or using the web.",
+            ["mode"] = "all",
+            ["model"] = $"{ProviderId}/{Policy.Model}",
+            ["permission"] = new JsonObject { ["edit"] = "allow", ["bash"] = "ask", ["webfetch"] = "ask", ["external_directory"] = "deny" },
         };
         Write(path, root);
         return null;
     }
+    public static JsonObject ProviderEntry(string apiKey, int context, string? endpoint = null) => new()
+    {
+        ["npm"] = "@ai-sdk/openai-compatible",
+        ["name"] = "Local Qwen (tray)",
+        ["options"] = new JsonObject { ["baseURL"] = endpoint ?? Endpoint, ["apiKey"] = apiKey },
+        ["models"] = new JsonObject
+        {
+            [Policy.Model] = new JsonObject
+            {
+                ["name"] = "Qwen3.8 27B (Local Qwen)",
+                ["attachment"] = true, ["reasoning"] = true, ["tool_call"] = true, ["temperature"] = true,
+                ["modalities"] = new JsonObject { ["input"] = new JsonArray("text", "image"), ["output"] = new JsonArray("text") },
+                ["limit"] = new JsonObject { ["context"] = context, ["output"] = OutputLimit },
+            },
+        },
+    };
     // Keeps OpenCode's context limit equal to what the engine actually loaded (fallbacks can lower it).
     public static void UpdateContext(int context, string? path = null)
     {
