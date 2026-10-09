@@ -58,14 +58,20 @@ internal static class BoundaryTests
         SelfTests.Check("PID reuse start time mismatch rejected",!(bool)matches.Invoke(null,new object[]{current.Id,ticks+1,currentExe})!);
         SelfTests.Check("foreign executable rejected",!(bool)matches.Invoke(null,new object[]{current.Id,ticks,"C:/not-owned.exe"})!);
         SelfTests.Check("missing PID rejected",!(bool)matches.Invoke(null,new object[]{int.MaxValue,ticks,currentExe})!);
-        SelfTests.Check("128K floor covers measured 25,042 MiB engine with vision plus margin",Policy.MinimumBudgetMiB == 25042 + Policy.MarginMiB);
+        SelfTests.Check("128K need covers measured 25,042 MiB engine with vision plus margin; floor is the 64K fallback",Policy.Need(Policy.Ctx128,0) == 25042 + Policy.MarginMiB && Policy.MinimumBudgetMiB == Policy.Need(Policy.Ctx64,0));
         SelfTests.Check("512 MiB fresh snapshot safety headroom",Policy.Budget(new(32000,32607)) == 31488);
-        SelfTests.Check("128K loads exactly at its floor",Policy.ChooseContext(Policy.Need(Policy.Ctx128,0),Policy.Ctx128) == Policy.Ctx128);
-        try {Policy.ChooseContext(Policy.Need(Policy.Ctx128,0)-1,Policy.Ctx256);SelfTests.Check("below 128K floor refuses before loading (never spills to RAM)",false);} catch(InvalidOperationException ex){SelfTests.Check("below 128K floor refuses before loading (never spills to RAM)",ex.Message.Contains("VRAM") && ex.Message.Contains("Ollama"));}
-        SelfTests.Check("256K loads when it fits",Policy.ChooseContext(Policy.Need(Policy.Ctx256,0),Policy.Ctx256) == Policy.Ctx256);
-        SelfTests.Check("256K falls back to 128K when VRAM is short",Policy.ChooseContext(Policy.Need(Policy.Ctx256,0)-1,Policy.Ctx256) == Policy.Ctx128);
-        SelfTests.Check("128K choice never grows to 256K",Policy.ChooseContext(31488,Policy.Ctx128) == Policy.Ctx128);
-        SelfTests.Check("a lighter quant's smaller weights lower the requirement",Policy.ChooseContext(Policy.Need(Policy.Ctx256,0)-2000,Policy.Ctx256,2000) == Policy.Ctx256);
+        int N(int ctx, int slots = 1) => Policy.Need(ctx, 0, slots);
+        SelfTests.Check("128K with one slot loads exactly at its floor", Policy.ChooseLaunch(N(Policy.Ctx128), Policy.Ctx128, 1) == (Policy.Ctx128, 1));
+        SelfTests.Check("two slots kept when they fit", Policy.ChooseLaunch(N(Policy.Ctx128, 2), Policy.Ctx128, 2) == (Policy.Ctx128, 2));
+        SelfTests.Check("short of VRAM: drop to one slot before shrinking the context", Policy.ChooseLaunch(N(Policy.Ctx128, 2) - 1, Policy.Ctx128, 2) == (Policy.Ctx128, 1));
+        SelfTests.Check("still short: fall back to 96K, then 64K", Policy.ChooseLaunch(N(Policy.Ctx128) - 1, Policy.Ctx128, 1) == (Policy.Ctx96, 1) && Policy.ChooseLaunch(N(Policy.Ctx96) - 1, Policy.Ctx128, 1) == (Policy.Ctx64, 1));
+        SelfTests.Check("a video editor holding ~4 GB (25.7 GB free) still gets 96K instead of a refusal", Policy.ChooseLaunch(Policy.Budget(new(25716, 32607)), Policy.Ctx256, 2) == (Policy.Ctx96, 1));
+        try {Policy.ChooseLaunch(N(Policy.Ctx64)-1,Policy.Ctx256,2);SelfTests.Check("below the 64K floor refuses before loading (never spills to RAM)",false);} catch(InvalidOperationException ex){SelfTests.Check("below the 64K floor refuses before loading (never spills to RAM)",ex.Message.Contains("VRAM") && ex.Message.Contains("Ollama"));}
+        SelfTests.Check("256K loads when it fits", Policy.ChooseLaunch(N(Policy.Ctx256, 2), Policy.Ctx256, 2) == (Policy.Ctx256, 2));
+        SelfTests.Check("256K falls back to 128K when VRAM is short", Policy.ChooseLaunch(N(Policy.Ctx256) - 1, Policy.Ctx256, 1) == (Policy.Ctx128, 1));
+        SelfTests.Check("128K choice never grows to 256K", Policy.ChooseLaunch(31488, Policy.Ctx128, 2).Context == Policy.Ctx128);
+        SelfTests.Check("a lighter quant's smaller weights lower the requirement", Policy.ChooseLaunch(N(Policy.Ctx256) - 2000, Policy.Ctx256, 1, 2000) == (Policy.Ctx256, 1));
+        SelfTests.Check("smaller contexts need less VRAM, never more", N(Policy.Ctx64) < N(Policy.Ctx96) && N(Policy.Ctx96) < N(Policy.Ctx128) && N(Policy.Ctx128, 2) - N(Policy.Ctx128) == Policy.SlotOverheadMiB);
         SelfTests.Check("context choices are 128K and the trained 256K maximum",Policy.ContextChoices.SequenceEqual(new[]{131072,262144}) && Policy.ContextCap == 262144);
         var fakeRoot=Path.Combine(Path.GetTempPath(),"localqwen-ollama-"+Guid.NewGuid());
         var manifestDir=Path.Combine(fakeRoot,"manifests","registry.ollama.ai","orcarouter","Qwen3.8-27B-Uncensored");
@@ -82,16 +88,16 @@ internal static class BoundaryTests
         Directory.Delete(cfgDir,true);
         var argsMethod=typeof(NativeHost).GetMethod("BuildArguments");
         SelfTests.Check("native launch uses verified shared MTP arguments",argsMethod is not null);
-        var args=(string[])argsMethod!.Invoke(null,new object[]{"model.gguf","projector.gguf",131072,"log.txt","codex-template.jinja"})!;
+        var args=(string[])argsMethod!.Invoke(null,new object[]{"model.gguf","projector.gguf",131072,"log.txt","codex-template.jinja",1})!;
         string argText=string.Join(" ",args);
         SelfTests.Check("one slot MTP5 GPU-only explicit Jinja and fit off",argText.Contains("-np 1") && argText.Contains("--spec-type draft-mtp") && argText.Contains("--spec-draft-n-max 5") && argText.Contains("--fit off") && argText.Contains("-ngl 999") && argText.Contains("--spec-draft-ngl 999") && argText.Contains("token_embd.weight=CUDA0") && args.Contains("--jinja") && !args.Contains("--spec-draft-model") && !args.Contains("--api-key"));
         SelfTests.Check("lossless speculation: MTP + n-gram drafts with probabilistic (rejection-sampled) verification",argText.Contains("--spec-type draft-mtp,ngram-mod") && argText.Contains("--spec-draft-sampling probabilistic") && argText.Contains("--spec-draft-n-max 5"));
         SelfTests.Check("b11429 restores bounded checkpoints and cross-prompt cache",argText.Contains("--ctx-checkpoints 4") && argText.Contains("--cache-ram 8192"));
         // mmap keeps the whole 18.6 GB GGUF resident in system RAM after upload to VRAM (measured 19.0 GB vs 0.8 GB idle).
         SelfTests.Check("weights are not memory-mapped after GPU upload",argText.Contains("--load-mode none"));
-        var noVision=string.Join(" ",(string[])argsMethod.Invoke(null,new object?[]{"model.gguf",null,131072,"log.txt","t.jinja"})!);
+        var noVision=string.Join(" ",(string[])argsMethod.Invoke(null,new object?[]{"model.gguf",null,131072,"log.txt","t.jinja",1})!);
         SelfTests.Check("a variant without a projector launches text-only",!noVision.Contains("--mmproj"));
-        var embedded=string.Join(" ",(string[])argsMethod.Invoke(null,new object?[]{"model.gguf","p.gguf",131072,"log.txt",null})!);
+        var embedded=string.Join(" ",(string[])argsMethod.Invoke(null,new object?[]{"model.gguf","p.gguf",131072,"log.txt",null,1})!);
         SelfTests.Check("without a custom template the GGUF's own template is used",embedded.Contains("--jinja") && !embedded.Contains("--chat-template-file"));
         SelfTests.Check("vision projector (mmproj) is loaded",argText.Contains("--mmproj projector.gguf"));
         SelfTests.Check("engine listens only on the private loopback port",argText.Contains($"--host 127.0.0.1 --port {Policy.BackendPort}") && !argText.Contains($"--port {Policy.PublicPort}"));
@@ -155,7 +161,7 @@ internal static class BoundaryTests
         File.WriteAllText(Path.Combine(sessionDir,"native-process.json"),JsonSerializer.Serialize(new NativeIdentity(self.Id,self.StartTime.ToUniversalTime().Ticks,Environment.ProcessPath!,131072,25000,"q5_K_M")));
         await sessionHost.SaveSession(default);
         var infoPath=Path.Combine(sessionDir,"sessions","session.json");
-        SelfTests.Check("unload saves the open conversation through llama-server's slot API",sessionHandler.SlotCalls.Count==1 && sessionHandler.SlotCalls[0].StartsWith("/slots/0?action=save") && sessionHandler.SlotCalls[0].Contains("session.bin") && File.ReadAllText(infoPath).Contains("\"Variant\":\"q5_K_M\"") && File.ReadAllText(infoPath).Contains("131072"));
+        SelfTests.Check("unload saves the open conversation through llama-server's slot API",sessionHandler.SlotCalls.Count==1 && sessionHandler.SlotCalls[0].StartsWith("/slots/0?action=save") && sessionHandler.SlotCalls[0].Contains("session-0.bin") && File.ReadAllText(infoPath).Contains("\"Variant\":\"q5_K_M\"") && File.ReadAllText(infoPath).Contains("131072"));
         await sessionHost.RestoreSession(default);
         SelfTests.Check("a compatible engine restores the saved conversation",sessionHandler.SlotCalls.Count==2 && sessionHandler.SlotCalls[1].StartsWith("/slots/0?action=restore"));
         File.WriteAllText(infoPath,File.ReadAllText(infoPath).Replace("\"q5_K_M\"","\"q4_K_M\""));
@@ -163,8 +169,15 @@ internal static class BoundaryTests
         SelfTests.Check("a different model variant never gets another's saved state",sessionHandler.SlotCalls.Count==2);
         sessionHandler.SavedTokens=1000; await sessionHost.SaveSession(default);
         SelfTests.Check("short conversations are not kept (re-reading them is faster)",!File.Exists(infoPath));
+        File.WriteAllText(Path.Combine(sessionDir,"native-process.json"),JsonSerializer.Serialize(new NativeIdentity(self.Id,self.StartTime.ToUniversalTime().Ticks,Environment.ProcessPath!,131072,25000,"q5_K_M",2)));
+        sessionHandler.SavedTokens=50000; sessionHandler.SlotCalls.Clear(); await sessionHost.SaveSession(default);
+        SelfTests.Check("with two slots each long conversation is saved", sessionHandler.SlotCalls.Count==2 && sessionHandler.SlotCalls[1].StartsWith("/slots/1?action=save") && File.ReadAllText(infoPath).Contains("\"SavedSlots\":[0,1]"));
+        sessionHandler.SlotCalls.Clear(); await sessionHost.RestoreSession(default);
+        SelfTests.Check("and both are restored into a matching two-slot engine", sessionHandler.SlotCalls.Count==2 && sessionHandler.SlotCalls.All(c=>c.Contains("action=restore")));
         Directory.Delete(sessionDir,true);
         SelfTests.Check("engine gets a slot save path for sessions",argText.Contains("--slot-save-path"));
+        var two=string.Join(" ",(string[])argsMethod.Invoke(null,new object?[]{"m.gguf",null,131072,"log.txt",null,2})!);
+        SelfTests.Check("two slots run with one shared KV pool", two.Contains("-np 2 --kv-unified") && argText.Contains("-np 1") && !argText.Contains("--kv-unified"));
         SelfTests.Check("secret redaction",!Secrets.Redact("Bearer xyz test-secret-value","test-secret-value").Contains("xyz"));
     }
 }

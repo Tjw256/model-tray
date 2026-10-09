@@ -22,7 +22,7 @@ internal sealed class StatusPanel : Form
     readonly Label stateTitle = new(), stateDetail = new(), lastReply = new();
     readonly Panel dot = new();
     readonly Button primary = new(), logs = new(), copy = new();
-    readonly ComboBox idle = new(), contextBox = new(), modelBox = new(), reasoningBox = new();
+    readonly ComboBox idle = new(), contextBox = new(), modelBox = new(), reasoningBox = new(), slotsBox = new();
     readonly Label modelHint = new();
     readonly CheckBox autostart = new();
     readonly System.Windows.Forms.Timer refresh = new() { Interval = 1000 };
@@ -84,6 +84,9 @@ internal sealed class StatusPanel : Form
         Combo(reasoningBox); foreach (var r in Policy.ReasoningChoices) reasoningBox.Items.Add(UiSpec.ReasoningText(r));
         reasoningBox.SelectedIndexChanged += (_, _) => { if (!updating) actions.SetReasoning(Policy.ReasoningChoices[reasoningBox.SelectedIndex]); };
         Row("Reasoning", reasoningBox);
+        Combo(slotsBox); foreach (var n in Policy.SlotChoices) slotsBox.Items.Add(n > 1 ? "2 — answer while busy" : "1 — one at a time");
+        slotsBox.SelectedIndexChanged += (_, _) => { if (!updating) actions.SetSlots(Policy.SlotChoices[slotsBox.SelectedIndex]); };
+        Row("Parallel", slotsBox);
         lastReply.AutoSize = true; Row("Last reply", lastReply);
         Combo(idle);
         foreach (var m in Policy.IdleChoices) idle.Items.Add(IdleText(m));
@@ -148,6 +151,7 @@ internal sealed class StatusPanel : Form
             var choice = actions.Choice;
             contextBox.SelectedIndex = Math.Max(0, Array.IndexOf(Policy.ContextChoices, choice.Context));
             reasoningBox.SelectedIndex = Math.Max(0, Array.IndexOf(Policy.ReasoningChoices, actions.Reasoning));
+            slotsBox.SelectedIndex = Math.Max(0, Array.IndexOf(Policy.SlotChoices, choice.Slots));
             var installed = actions.InstalledVariants;
             if (!modelBox.Items.Cast<VariantItem>().Select(x => x.Variant).SequenceEqual(installed))
             { modelBox.Items.Clear(); foreach (var v in installed) modelBox.Items.Add(new VariantItem(v)); }
@@ -171,9 +175,9 @@ internal sealed class StatusPanel : Form
     string Loaded()
     {
         if (actions.Loaded is not { } l) return "";
-        string text = $"{l.Variant.ToUpperInvariant()} · {Policy.ContextLabel(l.Context)}";
-        if (l.Context < actions.Choice.Context) text += $" (not enough free VRAM for {Policy.ContextLabel(actions.Choice.Context)})";
-        else if (l.Variant != actions.Choice.Variant || l.Context != actions.Choice.Context) text += " (new choice applies on next load)";
+        string text = $"{l.Variant.ToUpperInvariant()} · {Policy.ContextLabel(l.Context)} · {(l.Slots > 1 ? "2 slots" : "1 slot")}";
+        if (l.Context < actions.Choice.Context || l.Slots < actions.Choice.Slots) text += " (less free VRAM than the choice needs)";
+        else if (l.Variant != actions.Choice.Variant || l.Context != actions.Choice.Context || l.Slots != actions.Choice.Slots) text += " (new choice applies on next load)";
         return text;
     }
     static string Span(TimeSpan t) => t.TotalMinutes >= 1 ? $"{Math.Ceiling(t.TotalMinutes):F0} min" : $"{Math.Max(1, (int)t.TotalSeconds)} s";

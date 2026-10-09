@@ -9,8 +9,9 @@ internal sealed class AppSettings
     public int ContextTokens { get; set; } = Policy.Ctx128;
     public string Variant { get; set; } = Policy.DefaultVariant;
     public string Reasoning { get; set; } = Policy.DefaultReasoning;
+    public int ParallelRequests { get; set; } = Policy.DefaultSlots;
     [System.Text.Json.Serialization.JsonIgnore] public string ReasoningOrDefault => Policy.ReasoningChoices.Contains(Reasoning) ? Reasoning : Policy.DefaultReasoning;
-    [System.Text.Json.Serialization.JsonIgnore] public LaunchChoice Choice => new(Policy.Variants.Contains(Variant) ? Variant : Policy.DefaultVariant, Policy.ContextChoices.Contains(ContextTokens) ? ContextTokens : Policy.Ctx128);
+    [System.Text.Json.Serialization.JsonIgnore] public LaunchChoice Choice => new(Policy.Variants.Contains(Variant) ? Variant : Policy.DefaultVariant, Policy.ContextChoices.Contains(ContextTokens) ? ContextTokens : Policy.Ctx128, Policy.SlotChoices.Contains(ParallelRequests) ? ParallelRequests : Policy.DefaultSlots);
     static string PathFor(string dir) => Path.Combine(dir, "settings.json");
     public static AppSettings Load(string dir)
     {

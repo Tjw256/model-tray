@@ -1,5 +1,6 @@
 namespace LocalQwenTray;
 internal record GpuMemory(int FreeMiB, int TotalMiB);
+internal sealed record EngineShape(string Variant, int Context, int Slots);
 internal record EngineState(bool Exists, bool Running, int ExitCode);
 internal record ProbeResult(bool Ready, bool Mismatch = false, string Detail = "");
 internal interface IQwenHost
@@ -15,7 +16,7 @@ internal interface IQwenHost
     Task SyncContext(ProbeResult probe, CancellationToken ct);
     Task<string> Diagnostics(CancellationToken ct);
     LaunchChoice Choice { get; set; }                    // what the next load uses
-    (string Variant, int Context)? Loaded();             // what the running engine actually loaded
+    EngineShape? Loaded();                               // what the running engine actually loaded
     Task SaveSession(CancellationToken ct);              // persist the open conversation before an unload
     Task RestoreSession(CancellationToken ct);           // bring it back after the next compatible load
 }

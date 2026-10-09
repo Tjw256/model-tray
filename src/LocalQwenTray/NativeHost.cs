@@ -7,13 +7,13 @@ using System.Text.RegularExpressions;
 namespace LocalQwenTray;
 internal record CommandResult(int ExitCode, string Output, string Error);
 internal interface ICommandRunner { Task<CommandResult> Run(string file, string[] args, TimeSpan timeout, CancellationToken ct); }
-internal record NativeIdentity(int Pid, long StartTimeUtcTicks, string Executable, int ContextTokens, int BudgetMiB, string? Variant = null);
+internal record NativeIdentity(int Pid, long StartTimeUtcTicks, string Executable, int ContextTokens, int BudgetMiB, string? Variant = null, int Slots = 1);
 internal sealed class NativeHost(AppConfig config, ICommandRunner commands, HttpClient http, string? stateDirectory = null) : IQwenHost
 {
     readonly string key = config.ApiKey;
     public string Executable => Path.GetFullPath(config.LlamaServer);
     public LaunchChoice Choice { get; set; } = LaunchChoice.Default;
-    public (string Variant, int Context)? Loaded() => ReadIdentity() is { } id && Valid(id) ? (id.Variant ?? Policy.DefaultVariant, id.ContextTokens) : null;
+    public EngineShape? Loaded() => ReadIdentity() is { } id && Valid(id) ? new(id.Variant ?? Policy.DefaultVariant, id.ContextTokens, Math.Max(1, id.Slots)) : null;
     string StateDirectory => stateDirectory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"LocalQwen");
     public string StatePath => Path.Combine(StateDirectory,"native-process.json");
     public string LogPath => Path.Combine(StateDirectory,"native-engine.log");
@@ -24,7 +24,7 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
     //  - ngram-mod: drafts long runs copied from the context (file edits, echoed tool output): 174 -> 365-385 tok/s.
     //  - probabilistic drafts + rejection sampling match sampled (temperature > 0) output: +6-14% on thinking/answers.
     //  Measured 2026-10-09 at 48K context on an RTX 5090 (b11517).
-    public static string[] BuildArguments(string model, string? projector, int context, string log, string? chatTemplate) => ["-m",model,..(projector is null ? Array.Empty<string>() : ["--mmproj",projector]),"-ngl","999","--fit","off","--load-mode","none","-c",context.ToString(),"-np","1","-t","4","-tb","4","-b","512","-ub","512","-fa","on","-ctk","q4_0","-ctv","q4_0","--spec-type","draft-mtp,ngram-mod","--spec-draft-sampling","probabilistic","--no-host","--spec-draft-n-max","5","--spec-draft-ngl","999","--spec-draft-threads","4","--spec-draft-threads-batch","4","--ctx-checkpoints","4","--cache-ram","8192","-lv","4","--override-tensor","token_embd.weight=CUDA0","--host","127.0.0.1","--port",Policy.BackendPort.ToString(),"--alias",Policy.Model,"--jinja",..(chatTemplate is null ? Array.Empty<string>() : ["--chat-template-file",chatTemplate]),"--log-colors","off","--log-file",log,"--slot-save-path",System.IO.Path.Combine(System.IO.Path.GetDirectoryName(log)!,"sessions")];
+    public static string[] BuildArguments(string model, string? projector, int context, string log, string? chatTemplate, int slots = 1) => ["-m",model,..(projector is null ? Array.Empty<string>() : ["--mmproj",projector]),"-ngl","999","--fit","off","--load-mode","none","-c",context.ToString(),"-np",slots.ToString(),..(slots > 1 ? new[]{"--kv-unified"} : Array.Empty<string>()),"-t","4","-tb","4","-b","512","-ub","512","-fa","on","-ctk","q4_0","-ctv","q4_0","--spec-type","draft-mtp,ngram-mod","--spec-draft-sampling","probabilistic","--no-host","--spec-draft-n-max","5","--spec-draft-ngl","999","--spec-draft-threads","4","--spec-draft-threads-batch","4","--ctx-checkpoints","4","--cache-ram","8192","-lv","4","--override-tensor","token_embd.weight=CUDA0","--host","127.0.0.1","--port",Policy.BackendPort.ToString(),"--alias",Policy.Model,"--jinja",..(chatTemplate is null ? Array.Empty<string>() : ["--chat-template-file",chatTemplate]),"--log-colors","off","--log-file",log,"--slot-save-path",System.IO.Path.Combine(System.IO.Path.GetDirectoryName(log)!,"sessions")];
     public static void ConfigureEnvironment(ProcessStartInfo info,string apiKey)
     {
         foreach(var name in info.Environment.Keys.Where(x=>x.StartsWith("LLAMA_",StringComparison.OrdinalIgnoreCase)).ToArray()) info.Environment.Remove(name);
@@ -106,7 +106,8 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
             ?? throw new FileNotFoundException($"Model {choice.Variant} is not downloaded in Ollama; run: ollama pull {OllamaModels.Repository}:{choice.Variant}");
         // VRAM needs are measured on the reference quant; others differ by roughly their weights-file size.
         int saving=Policy.ReferenceWeightsMiB-(int)(files.ModelBytes/(1024*1024));
-        int budget=Policy.Budget(memory),context=Policy.ChooseContext(budget,choice.Context,saving);
+        int budget=Policy.Budget(memory);
+        var (context,slots)=Policy.ChooseLaunch(budget,choice.Context,choice.Slots,saving);
         if(!File.Exists(Executable)) throw new FileNotFoundException($"llama-server.exe not found at {Executable}; set LlamaServer in {AppConfig.PathIn(StateDirectory)}");
         if(ChatTemplatePath is not null && !File.Exists(ChatTemplatePath)) throw new FileNotFoundException($"Chat template not found at {ChatTemplatePath}; fix or clear ChatTemplate in config.json");
         Directory.CreateDirectory(StateDirectory);
@@ -116,11 +117,11 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
         File.WriteAllText(LogPath,"");
         var info=new ProcessStartInfo(Executable){UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=Path.GetDirectoryName(Executable)!};
         ConfigureEnvironment(info,key);
-        foreach(var arg in BuildArguments(files.Model,files.Projector,context,LogPath,ChatTemplatePath)) info.ArgumentList.Add(arg);
+        foreach(var arg in BuildArguments(files.Model,files.Projector,context,LogPath,ChatTemplatePath,slots)) info.ArgumentList.Add(arg);
         using var process=DetachedNative.Start(info);
         try
         {
-            var identity=new NativeIdentity(process.Id,process.StartTime.ToUniversalTime().Ticks,Executable,context,budget,choice.Variant);
+            var identity=new NativeIdentity(process.Id,process.StartTime.ToUniversalTime().Ticks,Executable,context,budget,choice.Variant,slots);
             for(int i=0; i<50 && !OwnedNativeProcess.Matches(identity.Pid,identity.StartTimeUtcTicks,Executable); i++)
             {
                 if(process.HasExited) throw new InvalidOperationException("Native process exited before ownership could be verified");
@@ -214,26 +215,37 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
     // message would re-read it all (about 21 s at 48K tokens). Saving the slot takes ~1.4 s and restoring ~1.2 s
     // (2 GB at 48K; measured 2026-10-09), after which the next turn re-reads only the new tokens. The file is
     // only restored into an engine with the same executable, model variant and context.
-    internal sealed record SessionInfo(string Executable, string Variant, int Context, int Tokens, DateTimeOffset SavedAt);
+    internal sealed record SessionInfo(string Executable, string Variant, int Context, int Slots, int[] SavedSlots, int Tokens, DateTimeOffset SavedAt);
     public const int MinimumSessionTokens = 4096;   // shorter conversations re-read faster than a save/restore round trip
     string SessionDirectory => Path.Combine(StateDirectory, "sessions");
     string SessionInfoPath => Path.Combine(SessionDirectory, "session.json");
-    const string SessionFile = "session.bin";
+    static string SessionFile(int slot) => $"session-{slot}.bin";
+    async Task<int> SlotAction(int slot, string action, CancellationToken ct)
+    {
+        using var request = Request(HttpMethod.Post, $"../slots/{slot}?action={action}");
+        request.Content = new StringContent(JsonSerializer.Serialize(new { filename = SessionFile(slot) }), Encoding.UTF8, "application/json");
+        using var response = await http.SendAsync(request, ct);
+        if (!response.IsSuccessStatusCode) return 0;
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+        return body.RootElement.TryGetProperty(action == "save" ? "n_saved" : "n_restored", out var n) ? n.GetInt32() : 0;
+    }
+    // Each slot that holds a long conversation is saved separately (two slots: e.g. a background job and a chat).
     public async Task SaveSession(CancellationToken ct)
     {
         if (Loaded() is not { } loaded) return;
         try
         {
             Directory.CreateDirectory(SessionDirectory);
-            if (File.Exists(SessionInfoPath)) File.Delete(SessionInfoPath);   // never pair a new file with old metadata
-            using var request = Request(HttpMethod.Post, "../slots/0?action=save");
-            request.Content = new StringContent(JsonSerializer.Serialize(new { filename = SessionFile }), Encoding.UTF8, "application/json");
-            using var response = await http.SendAsync(request, ct);
-            if (!response.IsSuccessStatusCode) return;
-            using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
-            int tokens = body.RootElement.TryGetProperty("n_saved", out var n) ? n.GetInt32() : 0;
-            if (tokens < MinimumSessionTokens) { File.Delete(Path.Combine(SessionDirectory, SessionFile)); return; }
-            File.WriteAllText(SessionInfoPath, JsonSerializer.Serialize(new SessionInfo(Executable, loaded.Variant, loaded.Context, tokens, DateTimeOffset.Now)));
+            if (File.Exists(SessionInfoPath)) File.Delete(SessionInfoPath);   // never pair new files with old metadata
+            var kept = new List<int>(); int total = 0;
+            for (int slot = 0; slot < loaded.Slots; slot++)
+            {
+                int tokens = await SlotAction(slot, "save", ct);
+                if (tokens >= MinimumSessionTokens) { kept.Add(slot); total += tokens; }
+                else File.Delete(Path.Combine(SessionDirectory, SessionFile(slot)));
+            }
+            if (kept.Count > 0)
+                File.WriteAllText(SessionInfoPath, JsonSerializer.Serialize(new SessionInfo(Executable, loaded.Variant, loaded.Context, loaded.Slots, [.. kept], total, DateTimeOffset.Now)));
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException or JsonException or UnauthorizedAccessException) { }
     }
@@ -243,10 +255,9 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
         try
         {
             var info = JsonSerializer.Deserialize<SessionInfo>(File.ReadAllText(SessionInfoPath));
-            if (info is null || !string.Equals(info.Executable, Executable, StringComparison.OrdinalIgnoreCase) || info.Variant != loaded.Variant || info.Context != loaded.Context) return;
-            using var request = Request(HttpMethod.Post, "../slots/0?action=restore");
-            request.Content = new StringContent(JsonSerializer.Serialize(new { filename = SessionFile }), Encoding.UTF8, "application/json");
-            using var response = await http.SendAsync(request, ct);
+            if (info is null || !string.Equals(info.Executable, Executable, StringComparison.OrdinalIgnoreCase) || info.Variant != loaded.Variant
+                || info.Context != loaded.Context || info.Slots != loaded.Slots) return;
+            foreach (var slot in info.SavedSlots) await SlotAction(slot, "restore", ct);
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException or JsonException or UnauthorizedAccessException) { }
     }

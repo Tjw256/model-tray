@@ -11,7 +11,8 @@ internal sealed class SingleInstance : IDisposable
 internal static class UiSpec
 {
     // Menu as shown while the model is asleep (the load item reads "Unload now" while loaded).
-    public static readonly string[] MenuLabels = ["Local Qwen", "Load now", "Context", "Model", "Reasoning", "Unload when idle", "Start with Windows", "Copy API endpoint", "Copy API key", "Open log", "Open config folder", "Quit Local Qwen"];
+    public static readonly string[] MenuLabels = ["Local Qwen", "Load now", "Context", "Model", "Reasoning", "Parallel requests", "Unload when idle", "Start with Windows", "Copy API endpoint", "Copy API key", "Open log", "Open config folder", "Quit Local Qwen"];
+    public static string SlotText(int slots) => slots > 1 ? "2 — answer while busy (+0.8 GB VRAM)" : "1 — one request at a time";
     public static string ReasoningText(string effort) => effort switch { "low" => "Low — fastest", "medium" => "Medium", _ => "High (xhigh) — most thorough" };
     public static bool StartsModelOnLaunch => false;   // the tray only listens; the first request loads the model
     public static bool StopsModelOnExit => true;       // without the gateway the model is unreachable, so quitting unloads it
@@ -38,10 +39,11 @@ internal interface TrayActions
     int? IdleMinutes { get; }
     bool Autostart { get; }
     LaunchChoice Choice { get; }                        // used by the next load
-    (string Variant, int Context)? Loaded { get; }      // what is running now
+    EngineShape? Loaded { get; }                        // what is running now
     IReadOnlyList<string> InstalledVariants { get; }
     string Reasoning { get; }                           // thinking effort applied to chat requests (no reload)
     void SetReasoning(string effort);
+    void SetSlots(int slots);
     void SetContext(int tokens);
     void SetVariant(string variant);
     void SetIdle(int? minutes);
@@ -68,7 +70,7 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
     readonly System.Windows.Forms.Timer timer = new() { Interval = 15000 };
     readonly CancellationTokenSource lifetime = new();
     readonly SynchronizationContext ui;
-    readonly ToolStripMenuItem header, loadUnload, contextMenu, modelMenu, reasoningMenu, idleMenu, autostartItem;
+    readonly ToolStripMenuItem header, loadUnload, contextMenu, modelMenu, reasoningMenu, slotsMenu, idleMenu, autostartItem;
     StatusPanel? panel;
     TrayState? shownState;
     string? gatewayError, lastBalloon;
@@ -101,20 +103,27 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
             item.Click += (_, _) => SetReasoning((string)item.Tag!);
             reasoningMenu.DropDownItems.Add(item);
         }
-        idleMenu = new(UiSpec.MenuLabels[5]);
+        slotsMenu = new(UiSpec.MenuLabels[5]);
+        foreach (var n in Policy.SlotChoices)
+        {
+            var item = new ToolStripMenuItem(UiSpec.SlotText(n)) { Tag = n };
+            item.Click += (_, _) => SetSlots((int)item.Tag!);
+            slotsMenu.DropDownItems.Add(item);
+        }
+        idleMenu = new(UiSpec.MenuLabels[6]);
         foreach (var m in Policy.IdleChoices)
         {
             var item = new ToolStripMenuItem(m is null ? "Never" : m == 60 ? "After 1 hour" : $"After {m} min") { Tag = m };
             item.Click += (_, _) => SetIdle((int?)item.Tag);
             idleMenu.DropDownItems.Add(item);
         }
-        autostartItem = new(UiSpec.MenuLabels[6]);
-        var copy = new ToolStripMenuItem(UiSpec.MenuLabels[7]);
-        var copyKey = new ToolStripMenuItem(UiSpec.MenuLabels[8]) { Enabled = apiKey is not null };
-        var openLog = new ToolStripMenuItem(UiSpec.MenuLabels[9]);
-        var openConfig = new ToolStripMenuItem(UiSpec.MenuLabels[10]);
-        var quit = new ToolStripMenuItem(UiSpec.MenuLabels[11]);
-        menu.Items.AddRange([header, new ToolStripSeparator(), loadUnload, contextMenu, modelMenu, reasoningMenu, idleMenu, autostartItem, new ToolStripSeparator(), copy, copyKey, openLog, openConfig, new ToolStripSeparator(), quit]);
+        autostartItem = new(UiSpec.MenuLabels[7]);
+        var copy = new ToolStripMenuItem(UiSpec.MenuLabels[8]);
+        var copyKey = new ToolStripMenuItem(UiSpec.MenuLabels[9]) { Enabled = apiKey is not null };
+        var openLog = new ToolStripMenuItem(UiSpec.MenuLabels[10]);
+        var openConfig = new ToolStripMenuItem(UiSpec.MenuLabels[11]);
+        var quit = new ToolStripMenuItem(UiSpec.MenuLabels[12]);
+        menu.Items.AddRange([header, new ToolStripSeparator(), loadUnload, contextMenu, modelMenu, reasoningMenu, slotsMenu, idleMenu, autostartItem, new ToolStripSeparator(), copy, copyKey, openLog, openConfig, new ToolStripSeparator(), quit]);
         copyKey.Click += (_, _) => { if (apiKey is not null) Clipboard.SetText(apiKey); };
         openConfig.Click += (_, _) => { Directory.CreateDirectory(stateDirectory); Process.Start(new ProcessStartInfo("explorer.exe", "\"" + stateDirectory + "\"") { UseShellExecute = false })?.Dispose(); };
         loadUnload.Click += async (_, _) => await (supervisor.IsReady ? Unload() : Load());
@@ -144,7 +153,7 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
     public int? IdleMinutes => settings.IdleMinutes;
     public bool Autostart => getAutostart();
     public LaunchChoice Choice => settings.Choice;
-    public (string Variant, int Context)? Loaded => supervisor.IsReady ? host.Loaded() : null;
+    public EngineShape? Loaded => supervisor.IsReady ? host.Loaded() : null;
     public IReadOnlyList<string> InstalledVariants => installedVariants();
     public string Reasoning => settings.ReasoningOrDefault;
     // Applied by the gateway to every following chat request; the loaded model keeps running.
@@ -154,6 +163,7 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
         try { settings.Save(stateDirectory); } catch (Exception ex) { log.Write("Saving settings failed: " + ex.Message); }
         RefreshView();
     }
+    public void SetSlots(int slots) => ApplyChoice(() => settings.ParallelRequests = slots);
     public void SetContext(int tokens) => ApplyChoice(() => settings.ContextTokens = tokens);
     public void SetVariant(string variant) => ApplyChoice(() => settings.Variant = variant);
     // The choice applies to the next load. If the model is loaded and idle, unload now so the next request reloads it.
@@ -164,7 +174,7 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
         host.Choice = settings.Choice;
         try { settings.Save(stateDirectory); } catch (Exception ex) { log.Write("Saving settings failed: " + ex.Message); }
         if (settings.Choice != before && supervisor.IsReady && supervisor.InFlight == 0 && host.Loaded() is { } running &&
-            (running.Variant != settings.Choice.Variant || running.Context != settings.Choice.Context)) _ = Unload();
+            (running.Variant != settings.Choice.Variant || running.Context != settings.Choice.Context || running.Slots != settings.Choice.Slots)) _ = Unload();
         RefreshView();
     }
     public void SetIdle(int? minutes)
@@ -223,6 +233,7 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
         loadUnload.Enabled = s != TrayState.Loading;
         foreach (ToolStripMenuItem item in idleMenu.DropDownItems) item.Checked = (int?)item.Tag == settings.IdleMinutes;
         foreach (ToolStripMenuItem item in contextMenu.DropDownItems) item.Checked = (int)item.Tag! == settings.Choice.Context;
+        foreach (ToolStripMenuItem item in slotsMenu.DropDownItems) item.Checked = (int)item.Tag! == settings.Choice.Slots;
         foreach (ToolStripMenuItem item in reasoningMenu.DropDownItems) item.Checked = (string)item.Tag! == settings.ReasoningOrDefault;
         var installed = installedVariants();
         modelMenu.DropDownItems.Clear();

@@ -90,8 +90,8 @@ internal static class SelfTests
             GatewayTests.Run().GetAwaiter().GetResult();
             Check("tray launch only listens; it does not load the model", !UiSpec.StartsModelOnLaunch);
             Check("quitting the tray unloads the model it serves", UiSpec.StopsModelOnExit);
-            Check("tray menu", UiSpec.MenuLabels.SequenceEqual(new[] {"Local Qwen","Load now","Context","Model","Reasoning","Unload when idle","Start with Windows","Copy API endpoint","Copy API key","Open log","Open config folder","Quit Local Qwen"}));
-            Check("default choice is Q5_K_M at 128K and settings fall back safely", LaunchChoice.Default == new LaunchChoice("q5_K_M", 131072) && new AppSettings { ContextTokens = 999, Variant = "bogus" }.Choice == LaunchChoice.Default);
+            Check("tray menu", UiSpec.MenuLabels.SequenceEqual(new[] {"Local Qwen","Load now","Context","Model","Reasoning","Parallel requests","Unload when idle","Start with Windows","Copy API endpoint","Copy API key","Open log","Open config folder","Quit Local Qwen"}));
+            Check("default choice is Q5_K_M at 128K and settings fall back safely", LaunchChoice.Default == new LaunchChoice("q5_K_M", 131072, 2) && new AppSettings { ContextTokens = 999, Variant = "bogus", ParallelRequests = 7 }.Choice == LaunchChoice.Default);
             Check("gateway owns the public port; engine is private", Policy.PublicPort == 8000 && Policy.BackendPort != Policy.PublicPort);
             Check("default auto-unload is 5 minutes and Never is offered", Policy.DefaultIdleMinutes == 5 && Policy.IdleChoices.Contains(null) && new AppSettings().IdleMinutes == 5);
             Check("icon renders for every state", Enum.GetValues<TrayState>().All(s => { using var b = TrayIcons.Render(16, s); return b.Width == 16; }));

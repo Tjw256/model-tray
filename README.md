@@ -47,6 +47,8 @@ Ollama and plain llama.cpp ran at about the same speed. The gain comes from sett
 - **Vision.** If the Ollama model includes a vision projector, it is loaded with `--mmproj`, so image input works.
 - **Reasoning: Low / Medium / High.** Qwen3.8's *thinking* text is the slowest part of its output: MTP accepts only about 30% of drafted tokens there, versus 70–90% in answers, so thinking runs at about 70–100 tok/s and answers at 125–160. The tray adds the chosen effort to each chat request (default **Low**, measured 10–20% faster than the template default *xhigh*). It also drops earlier turns' thinking from the history, as Qwen's official template does, so long conversations grow more slowly. Switching takes effect on the next message, with no reload. Clients that set `reasoning_effort` or `preserve_thinking` themselves are never overridden.
 - **Fast resume after an idle unload.** Before unloading, the tray saves the open conversation's state to disk (llama.cpp slot save; about 2 GB and 1.4 s at 48K tokens). After the next load it restores it, but only into an engine with the same executable, model and context. So the next message re-reads only its new tokens, not the whole conversation. Measured: resuming a 48K-token conversation took 11.9 s including the model load and re-read 62 tokens, versus 31 s and 48,279 tokens without it.
+- **Two requests at once.** Two slots share one KV pool (`-np 2 --kv-unified`; each can still use the whole context), so a short request no longer waits behind a long one. While a cached 48K-token background conversation was generating, a short email request finished in **1.2 s instead of 12.7 s**, and the background job ran 7% slower. The second slot costs about 0.8 GB of VRAM. Choice: Parallel requests 2 / 1.
+- **Graceful VRAM fallback.** If the chosen setup doesn't fit, for example while a video editor holds a few GB, the tray first drops to one slot and then to a smaller context (256K → 128K → 96K → 64K) instead of refusing. It never spills into system RAM; the panel shows what was loaded and why.
 - **Context 128K or 256K.** 256K is the model's trained maximum. If there isn't enough free VRAM for 256K when the model loads, it falls back to 128K and the panel tells you why. It never spills into system RAM.
 - **Checks before and after loading.** Free VRAM is checked first, and a load that doesn't fit is refused with a clear message (HTTP 503). After loading, the log is checked to confirm that all layers, the KV cache and the MTP draft are on the GPU.
 - **Safe process ownership.** It only ever stops the `llama-server` it started, tracked by PID, start time and executable. Unknown programs on its ports are never killed.
@@ -54,7 +56,7 @@ Ollama and plain llama.cpp ran at about the same speed. The gain comes from sett
 ### The tray
 
 - **Icon dot:** grey = sleeping, amber = loading, green = ready, blue = generating, red = needs attention.
-- **Left-click** opens the status panel (shown above). **Right-click** gives the same actions as a menu: Load/Unload now, Context, Model, Reasoning, Unload when idle, Start with Windows, Copy API endpoint, Copy API key, Open log, Open config folder, Quit.
+- **Left-click** opens the status panel (shown above). **Right-click** gives the same actions as a menu: Load/Unload now, Context, Model, Reasoning, Parallel requests, Unload when idle, Start with Windows, Copy API endpoint, Copy API key, Open log, Open config folder, Quit.
 - Quitting the tray also unloads the model, since clients can't reach it without the tray.
 
 ## Requirements
@@ -93,7 +95,7 @@ Ollama and plain llama.cpp ran at about the same speed. The gain comes from sett
 | `ModelName` | Name advertised on `/v1/models`. |
 | `ClientSyncCommand` | Optional command run after a load whose context size changed. `{context}` is replaced with the token count. Use it to update your clients' context settings. |
 
-Tray choices (context, model, reasoning, idle timeout) are saved in `settings.json` in the same folder. Logs are in the same folder: `tray.log` and `native-engine.log`.
+Tray choices (context, model, reasoning, parallel requests, idle timeout) are saved in `settings.json` in the same folder. Logs are in the same folder: `tray.log` and `native-engine.log`.
 
 ## Customizing
 

@@ -4,9 +4,9 @@ internal sealed class TestHost : IQwenHost
 {
     public EngineState State = new(false, false, 0);
     public ProbeResult Health = new(false);
-    public int Total = 32607, LastBudget, LastContext;
+    public int Total = 32607, LastBudget, LastContext, LastSlots;
     public LaunchChoice Choice { get; set; } = LaunchChoice.Default;
-    public (string Variant, int Context)? Loaded() => State.Running ? (Choice.Variant, LastContext) : null;
+    public EngineShape? Loaded() => State.Running ? new(Choice.Variant, LastContext, LastSlots) : null;
     public int Free = 32000, UpCalls, StopCalls, FreeCalls, Delays;
     public bool BecomesReady = true, ForeignListener;
     public Func<CancellationToken, Task>? DelayHook, StopHook;
@@ -14,7 +14,7 @@ internal sealed class TestHost : IQwenHost
     public Task<IDisposable> AcquireLease(CancellationToken ct) => Task.FromResult<IDisposable>(new MemoryStream());
     public Task<EngineState> Inspect(CancellationToken ct) => Task.FromResult(InspectHook?.Invoke() ?? State);
     public Task<GpuMemory> FreeVram(CancellationToken ct) { FreeCalls++; return Task.FromResult(new GpuMemory(Free, Total)); }
-    public Task LaunchNative(GpuMemory memory, CancellationToken ct) { LastBudget = Policy.Budget(memory); LastContext = Policy.ChooseContext(LastBudget, Choice.Context); UpCalls++; State = new(true, true, 0); return Task.CompletedTask; }
+    public Task LaunchNative(GpuMemory memory, CancellationToken ct) { LastBudget = Policy.Budget(memory); (LastContext, LastSlots) = Policy.ChooseLaunch(LastBudget, Choice.Context, Choice.Slots); UpCalls++; State = new(true, true, 0); return Task.CompletedTask; }
     public async Task Stop(CancellationToken ct) { if (ForeignListener || !State.Running && (Health.Ready || Health.Mismatch)) throw new InvalidOperationException("Unknown listener still open"); if (State.Running) { StopCalls++; if (StopHook is not null) await StopHook(ct); } State = new(true, false, 0); Health = new(false); }
     public int InferenceProbes, PassiveProbes;
     public Task<ProbeResult> Probe(CancellationToken ct, bool verifyInference = true)
