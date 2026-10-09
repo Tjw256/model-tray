@@ -1,0 +1,145 @@
+using System.Net;
+using System.Text.Json;
+namespace LocalQwenTray;
+internal sealed class RecordingCommands : ICommandRunner
+{
+    public List<string[]> Calls = [];
+    public CommandResult Result = new(0,""," ");
+    public Task<CommandResult> Run(string file,string[] args,TimeSpan timeout,CancellationToken ct) { Calls.Add([file,..args]); return Task.FromResult(Result); }
+}
+internal sealed class TestHttp : HttpMessageHandler
+{
+    public List<HttpRequestMessage> Requests = [];
+    public bool CompletionFails, IdentityMismatch;
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct)
+    {
+        Requests.Add(request);
+        bool models = request.RequestUri!.AbsolutePath.EndsWith("/models");
+        var content = models ? JsonSerializer.Serialize(new {data=new[]{new {id=IdentityMismatch ? "wrong" : Policy.Model,aliases=IdentityMismatch ? new[]{"wrong"}:new[]{Policy.Model},meta=new{n_ctx=65536}}}})
+          : JsonSerializer.Serialize(new{model=Policy.Model,choices=new[]{new{message=new{content="OK"}}}});
+        return Task.FromResult(new HttpResponseMessage(!models && CompletionFails ? HttpStatusCode.ServiceUnavailable : HttpStatusCode.OK){Content=new StringContent(content)});
+    }
+}
+internal static class BoundaryTests
+{
+    public static async Task Run()
+    {
+        var detached=typeof(NativeHost).Assembly.GetType("LocalQwenTray.DetachedNative");
+        SelfTests.Check("native child cannot inherit CLI capture pipes",detached is not null);
+        var start=detached!.GetMethod("Start");
+        var info=new System.Diagnostics.ProcessStartInfo("C:/Program Files/dotnet/dotnet.exe"){UseShellExecute=false};
+        info.ArgumentList.Add("--version");
+        using(var child=(System.Diagnostics.Process)start!.Invoke(null,new object[]{info})!)
+        {using var bounded=new CancellationTokenSource(5000);await child.WaitForExitAsync(bounded.Token);SelfTests.Check("detached native process runs without inherited stdio, exit="+child.ExitCode,child.ExitCode==0);}
+        var residency=typeof(NativeHost).GetMethod("ValidateResidency");
+        SelfTests.Check("all-GPU native residency gate exists",residency is not null);
+        string gpuLog="offloaded 66/66 layers to GPU\nCUDA0 model buffer size = 18620.22 MiB\nCUDA0 KV buffer size = 2304.00 MiB\nCUDA0 KV buffer size = 512.00 MiB\ncreating MTP draft context against the target model\nadding speculative implementation 'draft-mtp'";
+        residency!.Invoke(null,new object[]{gpuLog});
+        SelfTests.Check("main and shared draft GPU log accepted",true);
+        try {residency.Invoke(null,new object[]{gpuLog.Replace("66/66","64/66")});SelfTests.Check("partial GPU offload rejected",false);} catch(System.Reflection.TargetInvocationException ex) when(ex.InnerException is InvalidOperationException){SelfTests.Check("partial GPU offload rejected",true);}
+        try {residency.Invoke(null,new object[]{gpuLog+"\nCPU model buffer size = 1.00 MiB"});SelfTests.Check("CPU model buffer rejected",false);} catch(System.Reflection.TargetInvocationException ex) when(ex.InnerException is InvalidOperationException){SelfTests.Check("CPU model buffer rejected",true);}
+        residency.Invoke(null,new object[]{gpuLog+"\nllama_context: n_ctx = 131072\nclip_model_loader: CPU model buffer size = 2.00 MiB"});
+        SelfTests.Check("vision projector buffers after context creation do not fail the language-model GPU check",true);
+        var ownerType=typeof(NativeHost).Assembly.GetType("LocalQwenTray.OwnedNativeProcess");
+        SelfTests.Check("native PID start-time exe ownership guard exists",ownerType is not null);
+        var matches=ownerType!.GetMethod("Matches");
+        using var current=System.Diagnostics.Process.GetCurrentProcess();
+        var currentExe=current.MainModule!.FileName;
+        var ticks=current.StartTime.ToUniversalTime().Ticks;
+        SelfTests.Check("exact process identity matches",(bool)matches!.Invoke(null,new object[]{current.Id,ticks,currentExe})!);
+        SelfTests.Check("verified ledger identity remains stable",OwnedNativeProcess.MatchesIdentity(current.Id,ticks));
+        SelfTests.Check("PID reuse start time mismatch rejected",!(bool)matches.Invoke(null,new object[]{current.Id,ticks+1,currentExe})!);
+        SelfTests.Check("foreign executable rejected",!(bool)matches.Invoke(null,new object[]{current.Id,ticks,"C:/not-owned.exe"})!);
+        SelfTests.Check("missing PID rejected",!(bool)matches.Invoke(null,new object[]{int.MaxValue,ticks,currentExe})!);
+        SelfTests.Check("128K floor covers measured 25,042 MiB engine with vision plus margin",Policy.MinimumBudgetMiB == 25042 + Policy.MarginMiB);
+        SelfTests.Check("512 MiB fresh snapshot safety headroom",Policy.Budget(new(32000,32607)) == 31488);
+        SelfTests.Check("128K loads exactly at its floor",Policy.ChooseContext(Policy.Need(Policy.Ctx128,0),Policy.Ctx128) == Policy.Ctx128);
+        try {Policy.ChooseContext(Policy.Need(Policy.Ctx128,0)-1,Policy.Ctx256);SelfTests.Check("below 128K floor refuses before loading (never spills to RAM)",false);} catch(InvalidOperationException ex){SelfTests.Check("below 128K floor refuses before loading (never spills to RAM)",ex.Message.Contains("VRAM") && ex.Message.Contains("Ollama"));}
+        SelfTests.Check("256K loads when it fits",Policy.ChooseContext(Policy.Need(Policy.Ctx256,0),Policy.Ctx256) == Policy.Ctx256);
+        SelfTests.Check("256K falls back to 128K when VRAM is short",Policy.ChooseContext(Policy.Need(Policy.Ctx256,0)-1,Policy.Ctx256) == Policy.Ctx128);
+        SelfTests.Check("128K choice never grows to 256K",Policy.ChooseContext(31488,Policy.Ctx128) == Policy.Ctx128);
+        SelfTests.Check("a lighter quant's smaller weights lower the requirement",Policy.ChooseContext(Policy.Need(Policy.Ctx256,0)-2000,Policy.Ctx256,2000) == Policy.Ctx256);
+        SelfTests.Check("context choices are 128K and the trained 256K maximum",Policy.ContextChoices.SequenceEqual(new[]{131072,262144}) && Policy.ContextCap == 262144);
+        var fakeRoot=Path.Combine(Path.GetTempPath(),"localqwen-ollama-"+Guid.NewGuid());
+        var manifestDir=Path.Combine(fakeRoot,"manifests","registry.ollama.ai","orcarouter","Qwen3.8-27B-Uncensored");
+        Directory.CreateDirectory(manifestDir); Directory.CreateDirectory(Path.Combine(fakeRoot,"blobs"));
+        File.WriteAllBytes(Path.Combine(fakeRoot,"blobs","sha256-aaa"),new byte[1234]); File.WriteAllBytes(Path.Combine(fakeRoot,"blobs","sha256-bbb"),new byte[10]);
+        File.WriteAllText(Path.Combine(manifestDir,"q4_K_M"),"{\"layers\":[{\"mediaType\":\"application/vnd.ollama.image.model\",\"digest\":\"sha256:aaa\"},{\"mediaType\":\"application/vnd.ollama.image.projector\",\"digest\":\"sha256:bbb\"}]}");
+        var found=OllamaModels.Find("q4_K_M",fakeRoot);
+        SelfTests.Check("Ollama manifest resolves model + vision blobs in place",found is {ModelBytes:1234} && found.Model.EndsWith("sha256-aaa") && found.Projector!.EndsWith("sha256-bbb") && OllamaModels.Find("q6_K",fakeRoot) is null);
+        Directory.Delete(fakeRoot,true);
+        var cfgDir=Path.Combine(Path.GetTempPath(),"localqwen-cfg-"+Guid.NewGuid()); var appDir=Path.Combine(Path.GetTempPath(),"localqwen-app-"+Guid.NewGuid());
+        var fresh=AppConfig.LoadOrCreate(cfgDir,appDir);
+        SelfTests.Check("first run creates config.json with a random 32-char key and a local llama-server path",fresh.ApiKey.Length==32 && fresh.LlamaServer==Path.Combine(appDir,"llama.cpp","llama-server.exe") && File.Exists(AppConfig.PathIn(cfgDir)) && fresh.ClientSyncCommand is null);
+        SelfTests.Check("config.json is reused on later runs",AppConfig.LoadOrCreate(cfgDir,appDir).ApiKey==fresh.ApiKey && AppConfig.LoadOrCreate(cfgDir,appDir).ApiKey!=AppConfig.LoadOrCreate(Path.Combine(cfgDir,"other"),appDir).ApiKey);
+        Directory.Delete(cfgDir,true);
+        var argsMethod=typeof(NativeHost).GetMethod("BuildArguments");
+        SelfTests.Check("native launch uses verified shared MTP arguments",argsMethod is not null);
+        var args=(string[])argsMethod!.Invoke(null,new object[]{"model.gguf","projector.gguf",131072,"log.txt","codex-template.jinja"})!;
+        string argText=string.Join(" ",args);
+        SelfTests.Check("one slot MTP5 GPU-only explicit Jinja and fit off",argText.Contains("-np 1") && argText.Contains("--spec-type draft-mtp") && argText.Contains("--spec-draft-n-max 5") && argText.Contains("--fit off") && argText.Contains("-ngl 999") && argText.Contains("--spec-draft-ngl 999") && argText.Contains("token_embd.weight=CUDA0") && args.Contains("--jinja") && !args.Contains("--spec-draft-model") && !args.Contains("--api-key"));
+        SelfTests.Check("b11429 restores bounded checkpoints and cross-prompt cache",argText.Contains("--ctx-checkpoints 4") && argText.Contains("--cache-ram 8192"));
+        // mmap keeps the whole 18.6 GB GGUF resident in system RAM after upload to VRAM (measured 19.0 GB vs 0.8 GB idle).
+        SelfTests.Check("weights are not memory-mapped after GPU upload",argText.Contains("--load-mode none"));
+        var noVision=string.Join(" ",(string[])argsMethod.Invoke(null,new object?[]{"model.gguf",null,131072,"log.txt","t.jinja"})!);
+        SelfTests.Check("a variant without a projector launches text-only",!noVision.Contains("--mmproj"));
+        var embedded=string.Join(" ",(string[])argsMethod.Invoke(null,new object?[]{"model.gguf","p.gguf",131072,"log.txt",null})!);
+        SelfTests.Check("without a custom template the GGUF's own template is used",embedded.Contains("--jinja") && !embedded.Contains("--chat-template-file"));
+        SelfTests.Check("vision projector (mmproj) is loaded",argText.Contains("--mmproj projector.gguf"));
+        SelfTests.Check("engine listens only on the private loopback port",argText.Contains($"--host 127.0.0.1 --port {Policy.BackendPort}") && !argText.Contains($"--port {Policy.PublicPort}"));
+        SelfTests.Check("Codex-compatible Qwen template is explicit",argText.Contains("--chat-template-file codex-template.jinja"));
+        var aliasIndex=Array.IndexOf(args,"--alias");
+        // Single-model llama-server serves any requested name (incl. Codex's codex-auto-review), but
+        // advertises the alphabetically first alias; a second alias would hijack the advertised ID.
+        SelfTests.Check("only the canonical model is advertised",aliasIndex>=0 && args[aliasIndex+1]==Policy.Model);
+        var configureEnvironment=typeof(NativeHost).GetMethod("ConfigureEnvironment");
+        SelfTests.Check("native launch environment policy exists",configureEnvironment is not null);
+        var launchInfo=new System.Diagnostics.ProcessStartInfo();
+        launchInfo.Environment["LLAMA_STALE_TEST"]="remove-me";
+        launchInfo.Environment["GGML_CUDA_DISABLE_GRAPHS"]="1";
+        configureEnvironment!.Invoke(null,new object[]{launchInfo,"test-secret-value"});
+        SelfTests.Check("CUDA graphs are not disabled (inherited override cleared)",!launchInfo.Environment.ContainsKey("GGML_CUDA_DISABLE_GRAPHS"));
+        SelfTests.Check("stale LLAMA variables are cleared and API key retained",!launchInfo.Environment.ContainsKey("LLAMA_STALE_TEST") && launchInfo.Environment["LLAMA_API_KEY"]=="test-secret-value");
+        var commands=new RecordingCommands(); var handler=new TestHttp();
+        using var http=new HttpClient(handler);
+        var stateDirectory=Path.Combine(Path.GetTempPath(),"localqwen-boundary-"+Guid.NewGuid());
+        Directory.CreateDirectory(stateDirectory);
+        var testConfig=new AppConfig{ApiKey="test-secret-value",LlamaServer="C:/llama.cpp/llama-server.exe",ClientSyncCommand=["sync-helper.exe","--context","{context}"]};
+        var host=new NativeHost(testConfig,commands,http,stateDirectory);
+        SelfTests.Check("llama-server path comes from config.json",host.Executable==Path.GetFullPath("C:/llama.cpp/llama-server.exe") && host.ChatTemplatePath is null);
+        var leaseMethod=typeof(NativeHost).GetMethod("AcquireLease");
+        SelfTests.Check("cross-process lifecycle serialization exists",leaseMethod is not null);
+        using(var lease=await (Task<IDisposable>)leaseMethod!.Invoke(host,new object[]{CancellationToken.None})!)
+        {
+            using var cancel=new CancellationTokenSource(100);
+            try {using var second=await (Task<IDisposable>)leaseMethod.Invoke(host,new object[]{cancel.Token})!;SelfTests.Check("simultaneous lifecycle cannot overlap",false);}
+            catch(OperationCanceledException){SelfTests.Check("simultaneous lifecycle cannot overlap",true);}
+        }
+        using(var after=await (Task<IDisposable>)leaseMethod!.Invoke(host,new object[]{CancellationToken.None})!) SelfTests.Check("lifecycle lease releases after cancellation",true);
+        File.WriteAllText(host.LogPath,"native-live-log");
+        using(var writer=new FileStream(host.LogPath,FileMode.Open,FileAccess.Write,FileShare.ReadWrite))
+            SelfTests.Check("diagnostics reads active native writer log safely",(await host.Diagnostics(default)).Contains("native-live-log"));
+        commands.Result=new(0,"{\"Running\":false,\"ExitCode\":0}","");
+        int callsBefore=commands.Calls.Count;
+        SelfTests.Check("missing native PID state does not invoke Docker",await host.Inspect(default)==new EngineState(false,false,0) && commands.Calls.Count==callsBefore);
+        commands.Result=new(0,"30500,32607\n","");
+        SelfTests.Check("single fresh GPU free total sample",await host.FreeVram(default)==new GpuMemory(30500,32607));
+        handler.Requests.Clear();
+        var probe=await host.Probe(default,false);
+        SelfTests.Check("native alias identity and metadata allocated context",probe.Ready && probe.Detail=="context 65536 tokens");
+        SelfTests.Check("monitor boundary GET-only",handler.Requests.Count==1 && handler.Requests.All(r=>r.Method==HttpMethod.Get));
+        handler.Requests.Clear();
+        SelfTests.Check("explicit start requires real completion and authenticated calls",(await host.Probe(default)).Ready && handler.Requests.Count==2 && handler.Requests.All(r=>r.Headers.Authorization?.Parameter=="test-secret-value"));
+        handler.CompletionFails=true;
+        SelfTests.Check("503 completion not Ready",!(await host.Probe(default)).Ready);
+        handler.IdentityMismatch=true;
+        SelfTests.Check("mismatched aliases rejected",(await host.Probe(default)).Mismatch);
+        await host.SyncContext(new(true,false,"context 65536 tokens"),default);
+        SelfTests.Check("optional client-sync hook receives the allocated context",commands.Calls.Last().SequenceEqual(new[]{"sync-helper.exe","--context","65536"}));
+        int syncCalls=commands.Calls.Count;
+        await host.SyncContext(new(true,false,"context 65536 tokens"),default);
+        SelfTests.Check("client-sync hook is skipped when the context did not change",commands.Calls.Count==syncCalls);
+        SelfTests.Check("secret redaction",!Secrets.Redact("Bearer xyz test-secret-value","test-secret-value").Contains("xyz"));
+    }
+}
+

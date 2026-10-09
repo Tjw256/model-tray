@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UseAppHost>true</UseAppHost>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>LocalQwen.ico</ApplicationIcon>
+    <RestoreIgnoreFailedSources>true</RestoreIgnoreFailedSources>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- In-process loopback gateway on :8000 (on-demand load / idle unload). -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <!-- Default chat template shipped next to the exe (config.json ChatTemplate can point elsewhere or be empty). -->
+    <None Include="qwen38-codex-chat-template.jinja" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

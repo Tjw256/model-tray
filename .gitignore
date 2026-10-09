@@ -1,0 +1,15 @@
+# Build output
+bin/
+obj/
+publish/
+*.user
+.vs/
+
+# Test/verification receipts
+self-test-results.txt
+verification.json
+
+# Never commit model weights or llama.cpp binaries
+*.gguf
+llama.cpp/
+*.zip

@@ -1,0 +1,8 @@
+{
+  "ApiKey": "created-randomly-on-first-run",
+  "LlamaServer": "C:\\Tools\\model-tray\\llama.cpp\\llama-server.exe",
+  "ChatTemplate": "C:\\Tools\\model-tray\\qwen38-codex-chat-template.jinja",
+  "OllamaRepository": "orcarouter/Qwen3.8-27B-Uncensored",
+  "ModelName": "qwen3.8-27b-uncensored-q5_k_m",
+  "ClientSyncCommand": null
+}
