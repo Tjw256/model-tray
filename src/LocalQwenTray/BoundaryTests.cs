@@ -78,6 +78,7 @@ internal static class BoundaryTests
         var args=(string[])argsMethod!.Invoke(null,new object[]{"model.gguf","projector.gguf",131072,"log.txt","codex-template.jinja"})!;
         string argText=string.Join(" ",args);
         SelfTests.Check("one slot MTP5 GPU-only explicit Jinja and fit off",argText.Contains("-np 1") && argText.Contains("--spec-type draft-mtp") && argText.Contains("--spec-draft-n-max 5") && argText.Contains("--fit off") && argText.Contains("-ngl 999") && argText.Contains("--spec-draft-ngl 999") && argText.Contains("token_embd.weight=CUDA0") && args.Contains("--jinja") && !args.Contains("--spec-draft-model") && !args.Contains("--api-key"));
+        SelfTests.Check("lossless speculation: MTP + n-gram drafts with probabilistic (rejection-sampled) verification",argText.Contains("--spec-type draft-mtp,ngram-mod") && argText.Contains("--spec-draft-sampling probabilistic") && argText.Contains("--spec-draft-n-max 5"));
         SelfTests.Check("b11429 restores bounded checkpoints and cross-prompt cache",argText.Contains("--ctx-checkpoints 4") && argText.Contains("--cache-ram 8192"));
         // mmap keeps the whole 18.6 GB GGUF resident in system RAM after upload to VRAM (measured 19.0 GB vs 0.8 GB idle).
         SelfTests.Check("weights are not memory-mapped after GPU upload",argText.Contains("--load-mode none"));

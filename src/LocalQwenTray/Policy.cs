@@ -21,7 +21,7 @@ internal static class Policy
     // Qwen3.8 thinking effort (chat template kwarg). Thinking text is the slow part: MTP accepts ~30% of drafted
     // tokens there vs 70-90% in answers; "low" measured 10-20% faster than the template default "xhigh" (2026-10-09).
     public static readonly string[] ReasoningChoices = ["low", "medium", "xhigh"];
-    public const string DefaultReasoning = "low";
+    public const string DefaultReasoning = "medium";   // owner choice 2026-10-09: balance of speed and thoroughness
     public static readonly string[] Variants = ["q5_K_M", "q4_K_M"];
     // Whole-engine VRAM for Q5_K_M with the vision projector: 128K measured 25,042 MiB (2026-10-08); 256K measured
     // 28,531 MiB (2026-10-09, 17.6 s load, 157.5 tok/s, no spill). A lighter quant

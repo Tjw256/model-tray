@@ -8,7 +8,7 @@ On the same model file and GPU it generated **about 2.8× faster than Ollama**:
 |---|---:|
 | Ollama 0.35.0 | 60 tok/s |
 | llama.cpp, plain | 62 tok/s |
-| **Model Tray (llama.cpp + built-in MTP speculative decoding)** | **172–177 tok/s** |
+| **Model Tray (llama.cpp + MTP / n-gram speculative decoding)** | **172–177 tok/s** (up to 676 on copy-heavy edits) |
 
 On real multi-turn coding work (temperature 0.7, varied tasks, 25 min) it averaged a **median of 161 tok/s** (range 117–212). Speed depends on how predictable the text is and drops as a conversation grows: about 108 tok/s with 118K tokens already in context, and 84 tok/s at 252K.
 
@@ -20,6 +20,7 @@ It is **Windows-first** and currently **tuned for Qwen3.8 27B on a 32 GB NVIDIA 
 
 Ollama and plain llama.cpp ran at about the same speed. The gain comes from settings that this app turns on for you:
 
+- **Lossless speculative decoding, three ways at once.** (1) Qwen3.8's built-in *multi-token prediction* head drafts 5 tokens ahead; (2) *n-gram lookup* drafts long runs copied from the context — file edits and echoed tool output went from 174 to 365–385 tok/s at 48K context (676 tok/s on a short file edit); (3) *probabilistic drafting* with rejection-sampled verification matches sampled output (temperature > 0), +6–14% on thinking and answers. The model verifies every drafted token, so output quality is unchanged.
 - **MTP speculative decoding.** Qwen3.8 ships with a built-in *multi-token prediction* head. llama.cpp's `--spec-type draft-mtp` uses it to draft 5 tokens ahead, and the main model checks them in one pass. No separate draft model is needed. A draft depth of 5 measured fastest; 4, 6 and 7 were all slower.
 - **CUDA graphs stay on.** Disabling them (`GGML_CUDA_DISABLE_GRAPHS=1`, a common "stability fix") cost 28% (174 → 125 tok/s) in an isolated A/B test.
 - **Everything on the GPU**, including the token-embedding table that llama.cpp otherwise leaves in system RAM, with flash attention and a 4-bit KV cache.
@@ -107,7 +108,7 @@ Pull requests are welcome.
 
 - **Don't set "CUDA – Sysmem Fallback Policy: Prefer No Sysmem Fallback"** for `llama-server.exe` in the NVIDIA Control Panel. With a large model resident, it made the whole desktop lag by seconds: the mouse, typing, both monitors. Driver Default fixed it. This app checks VRAM before loading instead.
 - **Crashes with "CUDA error: an illegal memory access" during long generations** can be the GPU, not llama.cpp. Check the Windows **System** log for `nvlddmkm` events. On the development machine they were caused by an undervolt curve that boosted to an unstable clock whenever the load dipped. Capping the curve fixed it, with no speed loss.
-- **Where the time goes at long context.** At 84K tokens of conversation, answers still ran at 125–140 tok/s, but thinking dropped to 67–88. Lowering the reasoning effort helped more than compacting earlier: going from 16K to 84K costs only about 15–20%. Draft depth 5 stayed best; 2 and 3 were slower overall. An 8-bit KV cache gave no gain for +1.5 GB, and on an RTX 5090 Q4_K_M was *slower* than Q5_K_M.
+- **Where the time goes at long context.** At 84K tokens of conversation, answers still ran at 125–140 tok/s, but thinking dropped to 67–88. Lowering the reasoning effort helped more than compacting earlier: going from 16K to 84K costs only about 15–20%. Draft depth 5 stayed best; 2 and 3 were slower overall. An 8-bit KV cache gave no gain for +1.5 GB, and on an RTX 5090 Q4_K_M was *slower* than Q5_K_M — and Q6_K 30–40% slower.
 - **Prompt re-processing on hybrid models.** Qwen3.8 mixes attention and recurrent layers. Appending to a conversation is cheap, because only the new tokens are processed, but editing earlier history forces a full re-read.
 
 ## Tests
