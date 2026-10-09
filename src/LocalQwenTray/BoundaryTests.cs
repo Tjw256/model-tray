@@ -11,9 +11,16 @@ internal sealed class TestHttp : HttpMessageHandler
 {
     public List<HttpRequestMessage> Requests = [];
     public bool CompletionFails, IdentityMismatch;
+    public int SavedTokens = 50000;
+    public List<string> SlotCalls = [];
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct)
     {
         Requests.Add(request);
+        if (request.RequestUri!.AbsolutePath.StartsWith("/slots"))
+        {
+            SlotCalls.Add(request.RequestUri.PathAndQuery + " " + request.Content!.ReadAsStringAsync(ct).Result);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK){Content=new StringContent("{\"n_saved\":"+SavedTokens+",\"n_restored\":"+SavedTokens+"}")});
+        }
         bool models = request.RequestUri!.AbsolutePath.EndsWith("/models");
         var content = models ? JsonSerializer.Serialize(new {data=new[]{new {id=IdentityMismatch ? "wrong" : Policy.Model,aliases=IdentityMismatch ? new[]{"wrong"}:new[]{Policy.Model},meta=new{n_ctx=65536}}}})
           : JsonSerializer.Serialize(new{model=Policy.Model,choices=new[]{new{message=new{content="OK"}}}});
@@ -140,6 +147,24 @@ internal static class BoundaryTests
         int syncCalls=commands.Calls.Count;
         await host.SyncContext(new(true,false,"context 65536 tokens"),default);
         SelfTests.Check("client-sync hook is skipped when the context did not change",commands.Calls.Count==syncCalls);
+        // Session persistence against a live "engine" (this test process stands in for llama-server.exe).
+        var sessionDir=Path.Combine(Path.GetTempPath(),"localqwen-session-"+Guid.NewGuid()); Directory.CreateDirectory(sessionDir);
+        using var self=System.Diagnostics.Process.GetCurrentProcess();
+        var sessionHandler=new TestHttp(); using var sessionHttp=new HttpClient(sessionHandler);
+        var sessionHost=new NativeHost(new AppConfig{ApiKey="k",LlamaServer=Environment.ProcessPath!},new RecordingCommands(),sessionHttp,sessionDir);
+        File.WriteAllText(Path.Combine(sessionDir,"native-process.json"),JsonSerializer.Serialize(new NativeIdentity(self.Id,self.StartTime.ToUniversalTime().Ticks,Environment.ProcessPath!,131072,25000,"q5_K_M")));
+        await sessionHost.SaveSession(default);
+        var infoPath=Path.Combine(sessionDir,"sessions","session.json");
+        SelfTests.Check("unload saves the open conversation through llama-server's slot API",sessionHandler.SlotCalls.Count==1 && sessionHandler.SlotCalls[0].StartsWith("/slots/0?action=save") && sessionHandler.SlotCalls[0].Contains("session.bin") && File.ReadAllText(infoPath).Contains("\"Variant\":\"q5_K_M\"") && File.ReadAllText(infoPath).Contains("131072"));
+        await sessionHost.RestoreSession(default);
+        SelfTests.Check("a compatible engine restores the saved conversation",sessionHandler.SlotCalls.Count==2 && sessionHandler.SlotCalls[1].StartsWith("/slots/0?action=restore"));
+        File.WriteAllText(infoPath,File.ReadAllText(infoPath).Replace("\"q5_K_M\"","\"q4_K_M\""));
+        await sessionHost.RestoreSession(default);
+        SelfTests.Check("a different model variant never gets another's saved state",sessionHandler.SlotCalls.Count==2);
+        sessionHandler.SavedTokens=1000; await sessionHost.SaveSession(default);
+        SelfTests.Check("short conversations are not kept (re-reading them is faster)",!File.Exists(infoPath));
+        Directory.Delete(sessionDir,true);
+        SelfTests.Check("engine gets a slot save path for sessions",argText.Contains("--slot-save-path"));
         SelfTests.Check("secret redaction",!Secrets.Redact("Bearer xyz test-secret-value","test-secret-value").Contains("xyz"));
     }
 }

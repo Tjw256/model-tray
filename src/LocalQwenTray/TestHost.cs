@@ -27,4 +27,8 @@ internal sealed class TestHost : IQwenHost
     public int SyncCalls;
     public Task SyncContext(ProbeResult probe, CancellationToken ct) { SyncCalls++; return Task.CompletedTask; }
     public Task<string> Diagnostics(CancellationToken ct) => Task.FromResult("test diagnostics");
+    public int SaveCalls, RestoreCalls;
+    public List<string> SessionEvents = [];
+    public Task SaveSession(CancellationToken ct) { SaveCalls++; SessionEvents.Add(State.Running ? "save-while-running" : "save-after-stop"); return Task.CompletedTask; }
+    public Task RestoreSession(CancellationToken ct) { RestoreCalls++; SessionEvents.Add(State.Running ? "restore-while-running" : "restore-without-engine"); return Task.CompletedTask; }
 }

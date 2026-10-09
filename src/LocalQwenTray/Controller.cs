@@ -16,11 +16,15 @@ internal interface IQwenHost
     Task<string> Diagnostics(CancellationToken ct);
     LaunchChoice Choice { get; set; }                    // what the next load uses
     (string Variant, int Context)? Loaded();             // what the running engine actually loaded
+    Task SaveSession(CancellationToken ct);              // persist the open conversation before an unload
+    Task RestoreSession(CancellationToken ct);           // bring it back after the next compatible load
 }
 internal sealed class Controller(IQwenHost host)
 {
     readonly SemaphoreSlim gate = new(1,1);
     public string Status { get; private set; } = "Checking status";
+    // True when the last Start launched a fresh engine (as opposed to adopting one that was already running).
+    public bool LastStartLaunched { get; private set; }
     public event Action<string>? Changed;
     static string Ready(ProbeResult probe) => string.IsNullOrEmpty(probe.Detail) ? "Ready" : $"Ready ({probe.Detail}; new client session may be needed)";
     void Set(string value) { if (Status == value) return; Status = value; Changed?.Invoke(value); }
@@ -46,6 +50,7 @@ internal sealed class Controller(IQwenHost host)
         deadline.CancelAfter(TimeSpan.FromMinutes(3));
         var token = deadline.Token;
         bool started = false;
+        LastStartLaunched = false;
         IDisposable? lease = null;
         try
         {
@@ -75,7 +80,7 @@ internal sealed class Controller(IQwenHost host)
                 }
                 var probe = await host.Probe(token);
                 if (probe.Mismatch) throw new InvalidOperationException("model identity mismatch; expected " + Policy.Model);
-                if (probe.Ready) { await host.VerifyResidency(probe,token); await host.SyncContext(probe,token); Set(Ready(probe)); return; }
+                if (probe.Ready) { await host.VerifyResidency(probe,token); await host.SyncContext(probe,token); LastStartLaunched = started; Set(Ready(probe)); return; }
                 await host.Delay(token);
             }
         }

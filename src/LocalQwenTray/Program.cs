@@ -70,7 +70,7 @@ internal static class Program
             var stateDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LocalQwen");
             var settings = AppSettings.Load(stateDirectory);
             host.Choice = settings.Choice;
-            var supervisor = new Supervisor(controller) { IdleTimeout = settings.IdleMinutes is int minutes ? TimeSpan.FromMinutes(minutes) : null };
+            var supervisor = new Supervisor(controller, sessions: host) { IdleTimeout = settings.IdleMinutes is int minutes ? TimeSpan.FromMinutes(minutes) : null };
             MigrateLegacyEngine(host, controller, log);
             Gateway? gateway = null;
             var gatewayLog = log;

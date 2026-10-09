@@ -24,7 +24,7 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
     //  - ngram-mod: drafts long runs copied from the context (file edits, echoed tool output): 174 -> 365-385 tok/s.
     //  - probabilistic drafts + rejection sampling match sampled (temperature > 0) output: +6-14% on thinking/answers.
     //  Measured 2026-10-09 at 48K context on an RTX 5090 (b11517).
-    public static string[] BuildArguments(string model, string? projector, int context, string log, string? chatTemplate) => ["-m",model,..(projector is null ? Array.Empty<string>() : ["--mmproj",projector]),"-ngl","999","--fit","off","--load-mode","none","-c",context.ToString(),"-np","1","-t","4","-tb","4","-b","512","-ub","512","-fa","on","-ctk","q4_0","-ctv","q4_0","--spec-type","draft-mtp,ngram-mod","--spec-draft-sampling","probabilistic","--no-host","--spec-draft-n-max","5","--spec-draft-ngl","999","--spec-draft-threads","4","--spec-draft-threads-batch","4","--ctx-checkpoints","4","--cache-ram","8192","-lv","4","--override-tensor","token_embd.weight=CUDA0","--host","127.0.0.1","--port",Policy.BackendPort.ToString(),"--alias",Policy.Model,"--jinja",..(chatTemplate is null ? Array.Empty<string>() : ["--chat-template-file",chatTemplate]),"--log-colors","off","--log-file",log];
+    public static string[] BuildArguments(string model, string? projector, int context, string log, string? chatTemplate) => ["-m",model,..(projector is null ? Array.Empty<string>() : ["--mmproj",projector]),"-ngl","999","--fit","off","--load-mode","none","-c",context.ToString(),"-np","1","-t","4","-tb","4","-b","512","-ub","512","-fa","on","-ctk","q4_0","-ctv","q4_0","--spec-type","draft-mtp,ngram-mod","--spec-draft-sampling","probabilistic","--no-host","--spec-draft-n-max","5","--spec-draft-ngl","999","--spec-draft-threads","4","--spec-draft-threads-batch","4","--ctx-checkpoints","4","--cache-ram","8192","-lv","4","--override-tensor","token_embd.weight=CUDA0","--host","127.0.0.1","--port",Policy.BackendPort.ToString(),"--alias",Policy.Model,"--jinja",..(chatTemplate is null ? Array.Empty<string>() : ["--chat-template-file",chatTemplate]),"--log-colors","off","--log-file",log,"--slot-save-path",System.IO.Path.Combine(System.IO.Path.GetDirectoryName(log)!,"sessions")];
     public static void ConfigureEnvironment(ProcessStartInfo info,string apiKey)
     {
         foreach(var name in info.Environment.Keys.Where(x=>x.StartsWith("LLAMA_",StringComparison.OrdinalIgnoreCase)).ToArray()) info.Environment.Remove(name);
@@ -110,6 +110,7 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
         if(!File.Exists(Executable)) throw new FileNotFoundException($"llama-server.exe not found at {Executable}; set LlamaServer in {AppConfig.PathIn(StateDirectory)}");
         if(ChatTemplatePath is not null && !File.Exists(ChatTemplatePath)) throw new FileNotFoundException($"Chat template not found at {ChatTemplatePath}; fix or clear ChatTemplate in config.json");
         Directory.CreateDirectory(StateDirectory);
+        Directory.CreateDirectory(SessionDirectory);
         // Separate per-load engine log; credentials travel only through the child environment.
         if(File.Exists(LogPath)) File.Copy(LogPath,LogPath+".previous",true);
         File.WriteAllText(LogPath,"");
@@ -208,6 +209,47 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
     }
     // Short poll: with on-demand loading a client request is waiting on readiness.
     public Task Delay(CancellationToken ct) => Task.Delay(TimeSpan.FromSeconds(1), ct);
+
+    // Session persistence: an idle unload would otherwise throw away the open conversation's cache, and the next
+    // message would re-read it all (about 21 s at 48K tokens). Saving the slot takes ~1.4 s and restoring ~1.2 s
+    // (2 GB at 48K; measured 2026-10-09), after which the next turn re-reads only the new tokens. The file is
+    // only restored into an engine with the same executable, model variant and context.
+    internal sealed record SessionInfo(string Executable, string Variant, int Context, int Tokens, DateTimeOffset SavedAt);
+    public const int MinimumSessionTokens = 4096;   // shorter conversations re-read faster than a save/restore round trip
+    string SessionDirectory => Path.Combine(StateDirectory, "sessions");
+    string SessionInfoPath => Path.Combine(SessionDirectory, "session.json");
+    const string SessionFile = "session.bin";
+    public async Task SaveSession(CancellationToken ct)
+    {
+        if (Loaded() is not { } loaded) return;
+        try
+        {
+            Directory.CreateDirectory(SessionDirectory);
+            if (File.Exists(SessionInfoPath)) File.Delete(SessionInfoPath);   // never pair a new file with old metadata
+            using var request = Request(HttpMethod.Post, "../slots/0?action=save");
+            request.Content = new StringContent(JsonSerializer.Serialize(new { filename = SessionFile }), Encoding.UTF8, "application/json");
+            using var response = await http.SendAsync(request, ct);
+            if (!response.IsSuccessStatusCode) return;
+            using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            int tokens = body.RootElement.TryGetProperty("n_saved", out var n) ? n.GetInt32() : 0;
+            if (tokens < MinimumSessionTokens) { File.Delete(Path.Combine(SessionDirectory, SessionFile)); return; }
+            File.WriteAllText(SessionInfoPath, JsonSerializer.Serialize(new SessionInfo(Executable, loaded.Variant, loaded.Context, tokens, DateTimeOffset.Now)));
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or JsonException or UnauthorizedAccessException) { }
+    }
+    public async Task RestoreSession(CancellationToken ct)
+    {
+        if (Loaded() is not { } loaded || !File.Exists(SessionInfoPath)) return;
+        try
+        {
+            var info = JsonSerializer.Deserialize<SessionInfo>(File.ReadAllText(SessionInfoPath));
+            if (info is null || !string.Equals(info.Executable, Executable, StringComparison.OrdinalIgnoreCase) || info.Variant != loaded.Variant || info.Context != loaded.Context) return;
+            using var request = Request(HttpMethod.Post, "../slots/0?action=restore");
+            request.Content = new StringContent(JsonSerializer.Serialize(new { filename = SessionFile }), Encoding.UTF8, "application/json");
+            using var response = await http.SendAsync(request, ct);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or JsonException or UnauthorizedAccessException) { }
+    }
     public async Task<string> Diagnostics(CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();

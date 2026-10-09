@@ -9,8 +9,8 @@ internal sealed class AppSettings
     public int ContextTokens { get; set; } = Policy.Ctx128;
     public string Variant { get; set; } = Policy.DefaultVariant;
     public string Reasoning { get; set; } = Policy.DefaultReasoning;
-    public string ReasoningOrDefault => Policy.ReasoningChoices.Contains(Reasoning) ? Reasoning : Policy.DefaultReasoning;
-    public LaunchChoice Choice => new(Policy.Variants.Contains(Variant) ? Variant : Policy.DefaultVariant, Policy.ContextChoices.Contains(ContextTokens) ? ContextTokens : Policy.Ctx128);
+    [System.Text.Json.Serialization.JsonIgnore] public string ReasoningOrDefault => Policy.ReasoningChoices.Contains(Reasoning) ? Reasoning : Policy.DefaultReasoning;
+    [System.Text.Json.Serialization.JsonIgnore] public LaunchChoice Choice => new(Policy.Variants.Contains(Variant) ? Variant : Policy.DefaultVariant, Policy.ContextChoices.Contains(ContextTokens) ? ContextTokens : Policy.Ctx128);
     static string PathFor(string dir) => Path.Combine(dir, "settings.json");
     public static AppSettings Load(string dir)
     {
@@ -25,7 +25,7 @@ internal sealed class AppSettings
 }
 // On-demand lifecycle: the first request loads the model (one shared load for concurrent callers),
 // in-flight requests are counted, and the model is unloaded after IdleTimeout with nothing in flight.
-internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? clock = null)
+internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? clock = null, IQwenHost? sessions = null)
 {
     readonly object sync = new();
     readonly Func<DateTimeOffset> now = clock ?? (() => DateTimeOffset.Now);
@@ -85,11 +85,28 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
         lock (sync)
         {
             lifetime.Token.ThrowIfCancellationRequested();
-            current = load is { IsCompleted: false } ? load : load = controller.Start(lifetime.Token);
+            current = load is { IsCompleted: false } ? load : load = LoadAndRestore(lifetime.Token);
         }
         await current.WaitAsync(ct);
         if (!IsReady) throw new InvalidOperationException(controller.Status.StartsWith("Error: ") ? controller.Status["Error: ".Length..] : controller.Status);
         lock (sync) LastActivity = now();
+    }
+    // Restores the conversation saved at the last unload, but only into an engine this load actually started.
+    async Task LoadAndRestore(CancellationToken ct)
+    {
+        await controller.Start(ct);
+        if (sessions is not null && IsReady && controller.LastStartLaunched)
+        {
+            try { await sessions.RestoreSession(ct); } catch (Exception) when (!ct.IsCancellationRequested) { /* a lost cache only costs a re-read */ }
+        }
+    }
+    async Task SaveThenStop(CancellationToken ct)
+    {
+        if (sessions is not null && IsReady)
+        {
+            try { await sessions.SaveSession(ct); } catch (Exception) when (!ct.IsCancellationRequested) { }
+        }
+        await controller.Stop(ct);
     }
     // Called periodically. Returns true when it unloaded the model.
     public async Task<bool> IdleTick(CancellationToken ct)
@@ -100,18 +117,18 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
             if (LastActivity == DateTimeOffset.MinValue) { LastActivity = now(); return false; } // adopted at startup: start the clock now
             if (now() - LastActivity < IdleTimeout.Value) return false;
         }
-        await controller.Stop(ct);
+        await SaveThenStop(ct);
         Changed?.Invoke();
         return true;
     }
-    public Task Unload(CancellationToken ct) => controller.Stop(ct);
+    public Task Unload(CancellationToken ct) => SaveThenStop(ct);
     // Quit: abandon any pending load (its own cleanup stops a half-started engine), then unload.
     public async Task Shutdown(CancellationToken ct)
     {
         Task? pending;
         lock (sync) { lifetime.Cancel(); pending = load; }
         if (pending is not null) { try { await pending.WaitAsync(ct); } catch (Exception) when (!ct.IsCancellationRequested) { } }
-        await controller.Stop(ct);
+        await SaveThenStop(ct);
     }
     public async Task LoadNow(CancellationToken ct) { await EnsureReady(ct); lock (sync) LastActivity = now(); }
 }

@@ -59,6 +59,22 @@ internal static class SelfTests
         Check("monitor mismatched model reports error", controller.Status.StartsWith("Error: model identity mismatch"));
         await controller.Stop(default);
     }
+    static async Task SessionLifecycle()
+    {
+        var host = new TestHost();
+        var controller = new Controller(host);
+        var supervisor = new Supervisor(controller, sessions: host);
+        await supervisor.EnsureReady(default);
+        Check("a load the tray started restores the saved conversation", host.SessionEvents.SequenceEqual(new[] { "restore-while-running" }));
+        supervisor.IdleTimeout = TimeSpan.FromMilliseconds(1); await Task.Delay(20); await supervisor.IdleTick(default);
+        Check("idle unload saves the conversation before stopping the engine", host.SessionEvents.Last() == "save-while-running" && !host.State.Running);
+        var adopted = new TestHost { State = new(true, true, 0), Health = new(true) };
+        var adoptedSupervisor = new Supervisor(new Controller(adopted), sessions: adopted);
+        await adoptedSupervisor.EnsureReady(default);
+        Check("an adopted, already-running engine is never overwritten by a saved session", adopted.RestoreCalls == 0 && adoptedSupervisor.IsReady);
+        await adoptedSupervisor.Shutdown(default);
+        Check("quitting saves the conversation before unloading", adopted.SessionEvents.SequenceEqual(new[] { "save-while-running" }) && !adopted.State.Running);
+    }
     public static int Run()
     {
         Results.Clear(); int result = 0;
@@ -69,6 +85,7 @@ internal static class SelfTests
             Check("loading remains Loading", Policy.Classify(true,false,false,0) == "Loading model");
             Check("Ready requires identity and inference", Policy.Classify(true,true,false,0) == "Ready");
             Lifecycle().GetAwaiter().GetResult();
+            SessionLifecycle().GetAwaiter().GetResult();
             BoundaryTests.Run().GetAwaiter().GetResult();
             GatewayTests.Run().GetAwaiter().GetResult();
             Check("tray launch only listens; it does not load the model", !UiSpec.StartsModelOnLaunch);
