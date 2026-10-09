@@ -8,7 +8,7 @@ internal static class Entry
         {
             if (args[i] == "--write-icon") { if (++i >= args.Length) throw new ArgumentException("--write-icon requires a path"); mode = "--write-icon"; continue; }
             if (args[i] == "--ui-preview") { if (++i >= args.Length) throw new ArgumentException("--ui-preview requires a folder"); mode = "--ui-preview"; continue; }
-            if (args[i] is not ("--start" or "--stop" or "--status" or "--self-test" or "--process-test" or "--ui-smoke-test")) throw new ArgumentException("Unknown argument: " + args[i]);
+            if (args[i] is not ("--start" or "--stop" or "--status" or "--connect-opencode" or "--self-test" or "--process-test" or "--ui-smoke-test")) throw new ArgumentException("Unknown argument: " + args[i]);
             if (mode != "tray") throw new ArgumentException("Choose only one command mode");
             mode = args[i];
         }
@@ -59,7 +59,8 @@ internal static class UiSmokeTests
         var supervisor = new Supervisor(controller);
         var settings = new AppSettings();
         bool autostart = false;
-        using var context = new TrayContext(supervisor, host, new SafeLog("test-secret-value", dir), settings, dir, null, () => autostart, v => autostart = v, () => ["q5_K_M", "q4_K_M"]);
+        string ocStatus = "Not connected"; int ocContext = 0;
+        using var context = new TrayContext(supervisor, host, new SafeLog("test-secret-value", dir), settings, dir, null, () => autostart, v => autostart = v, () => ["q5_K_M", "q4_K_M"], "test-secret-value", () => ocStatus, ctx => { ocContext = ctx; ocStatus = "Connected"; return null; });
         using var timer = new System.Windows.Forms.Timer { Interval = 300 };
         int result = 0;
         timer.Tick += async (_, _) =>
@@ -120,6 +121,12 @@ internal static class UiSmokeTests
                 Item(context, UiSpec.MenuLabels[7]).PerformClick();
                 if (!autostart) throw new Exception("Start with Windows toggle not applied");
                 Console.WriteLine("PASS Start with Windows toggle");
+                context.RefreshView();
+                Item(context, "Connect OpenCode (T3 Code)").PerformClick();
+                if (ocStatus != "Connected" || ocContext < Policy.Ctx64 || context.OpenCodeStatus != "Connected") throw new Exception("OpenCode connect not applied");
+                context.RefreshView();
+                if (!context.Menu.Items.OfType<ToolStripMenuItem>().Any(x => (x.Text ?? "").StartsWith("OpenCode (T3 Code): connected"))) throw new Exception("Menu does not show OpenCode as connected");
+                Console.WriteLine("PASS Connect OpenCode (T3 Code) writes the provider and the menu shows it");
                 context.TogglePanel();
                 await Task.Delay(100);
                 var panel = Application.OpenForms.OfType<StatusPanel>().SingleOrDefault();
@@ -146,7 +153,7 @@ internal static class UiSmokeTests
             var loadedSupervisor = new Supervisor(new Controller(loadedHost));
             using var loadedContext = new TrayContext(loadedSupervisor, loadedHost, new SafeLog("test-secret-value", dir), new AppSettings(), dir, null, () => false, _ => { });
             using var exitTimer = new System.Windows.Forms.Timer { Interval = 200 };
-            exitTimer.Tick += (_, _) => { exitTimer.Stop(); Item(loadedContext, UiSpec.MenuLabels[12]).PerformClick(); };
+            exitTimer.Tick += (_, _) => { exitTimer.Stop(); Item(loadedContext, UiSpec.MenuLabels[13]).PerformClick(); };
             exitTimer.Start(); Application.Run(loadedContext);
             if (loadedHost.StopCalls != 1 || loadedHost.State.Running) { Console.WriteLine("FAIL quitting a loaded tray must unload the model"); result = 1; }
             else Console.WriteLine("PASS quitting the tray unloads a loaded model");

@@ -11,7 +11,7 @@ internal sealed class SingleInstance : IDisposable
 internal static class UiSpec
 {
     // Menu as shown while the model is asleep (the load item reads "Unload now" while loaded).
-    public static readonly string[] MenuLabels = ["Local Qwen", "Load now", "Context", "Model", "Reasoning", "Parallel requests", "Unload when idle", "Start with Windows", "Copy API endpoint", "Copy API key", "Open log", "Open config folder", "Quit Local Qwen"];
+    public static readonly string[] MenuLabels = ["Local Qwen", "Load now", "Context", "Model", "Reasoning", "Parallel requests", "Unload when idle", "Start with Windows", "Copy API endpoint", "Copy API key", "Connect OpenCode (T3 Code)", "Open log", "Open config folder", "Quit Local Qwen"];
     public static string SlotText(int slots) => slots > 1 ? "2 — answer while busy (+0.8 GB VRAM)" : "1 — one request at a time";
     public static string ReasoningText(string effort) => effort switch { "low" => "Low — fastest", "medium" => "Medium", _ => "High (xhigh) — most thorough" };
     public static bool StartsModelOnLaunch => false;   // the tray only listens; the first request loads the model
@@ -44,6 +44,8 @@ internal interface TrayActions
     string Reasoning { get; }                           // thinking effort applied to chat requests (no reload)
     void SetReasoning(string effort);
     void SetSlots(int slots);
+    string OpenCodeStatus { get; }                      // "Connected", "Not connected" or "Not installed"
+    void ConnectOpenCode();
     void SetContext(int tokens);
     void SetVariant(string variant);
     void SetIdle(int? minutes);
@@ -63,6 +65,9 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
     readonly Func<bool> getAutostart;
     readonly Action<bool> setAutostart;
     readonly Func<IReadOnlyList<string>> installedVariants;
+    readonly Func<string> openCodeStatus;
+    readonly Func<int, string?> connectOpenCode;
+    readonly ToolStripMenuItem openCodeItem;
     readonly NotifyIcon icon;
     readonly ContextMenuStrip menu = new();
     internal ContextMenuStrip Menu => menu;
@@ -78,7 +83,7 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
     internal Task? Quitting { get; private set; }
 
     public TrayContext(Supervisor supervisor, IQwenHost host, SafeLog log, AppSettings settings, string stateDirectory,
-        Func<Task<string?>>? ensureGateway = null, Func<bool>? getAutostart = null, Action<bool>? setAutostart = null, Func<IReadOnlyList<string>>? installedVariants = null, string? apiKey = null)
+        Func<Task<string?>>? ensureGateway = null, Func<bool>? getAutostart = null, Action<bool>? setAutostart = null, Func<IReadOnlyList<string>>? installedVariants = null, string? apiKey = null, Func<string>? openCodeStatus = null, Func<int, string?>? connectOpenCode = null)
     {
         this.supervisor = supervisor; this.host = host; this.log = log; this.settings = settings; this.stateDirectory = stateDirectory;
         this.ensureGateway = ensureGateway;
@@ -86,6 +91,8 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
         this.setAutostart = setAutostart ?? StartupRegistration.Set;
         this.installedVariants = installedVariants ?? (() => OllamaModels.Tags());
         host.Choice = settings.Choice;
+        this.openCodeStatus = openCodeStatus ?? (() => !OpenCodeClient.Installed() ? "Not installed" : OpenCodeClient.IsConnected() ? "Connected" : "Not connected");
+        this.connectOpenCode = connectOpenCode ?? (context => apiKey is null ? "No API key" : OpenCodeClient.Connect(apiKey, context));
         header = new(UiSpec.MenuLabels[0]) { Enabled = false, Font = new Font(menu.Font, FontStyle.Bold) };
         loadUnload = new(UiSpec.MenuLabels[1]);
         contextMenu = new(UiSpec.MenuLabels[2]);
@@ -120,11 +127,13 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
         autostartItem = new(UiSpec.MenuLabels[7]);
         var copy = new ToolStripMenuItem(UiSpec.MenuLabels[8]);
         var copyKey = new ToolStripMenuItem(UiSpec.MenuLabels[9]) { Enabled = apiKey is not null };
-        var openLog = new ToolStripMenuItem(UiSpec.MenuLabels[10]);
-        var openConfig = new ToolStripMenuItem(UiSpec.MenuLabels[11]);
-        var quit = new ToolStripMenuItem(UiSpec.MenuLabels[12]);
-        menu.Items.AddRange([header, new ToolStripSeparator(), loadUnload, contextMenu, modelMenu, reasoningMenu, slotsMenu, idleMenu, autostartItem, new ToolStripSeparator(), copy, copyKey, openLog, openConfig, new ToolStripSeparator(), quit]);
+        openCodeItem = new ToolStripMenuItem(UiSpec.MenuLabels[10]);
+        var openLog = new ToolStripMenuItem(UiSpec.MenuLabels[11]);
+        var openConfig = new ToolStripMenuItem(UiSpec.MenuLabels[12]);
+        var quit = new ToolStripMenuItem(UiSpec.MenuLabels[13]);
+        menu.Items.AddRange([header, new ToolStripSeparator(), loadUnload, contextMenu, modelMenu, reasoningMenu, slotsMenu, idleMenu, autostartItem, new ToolStripSeparator(), copy, copyKey, openCodeItem, openLog, openConfig, new ToolStripSeparator(), quit]);
         copyKey.Click += (_, _) => { if (apiKey is not null) Clipboard.SetText(apiKey); };
+        openCodeItem.Click += (_, _) => ConnectOpenCode();
         openConfig.Click += (_, _) => { Directory.CreateDirectory(stateDirectory); Process.Start(new ProcessStartInfo("explorer.exe", "\"" + stateDirectory + "\"") { UseShellExecute = false })?.Dispose(); };
         loadUnload.Click += async (_, _) => await (supervisor.IsReady ? Unload() : Load());
         autostartItem.Click += (_, _) => SetAutostart(!autostartItem.Checked);
@@ -161,6 +170,17 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
     {
         settings.Reasoning = effort;
         try { settings.Save(stateDirectory); } catch (Exception ex) { log.Write("Saving settings failed: " + ex.Message); }
+        RefreshView();
+    }
+    public string OpenCodeStatus => openCodeStatus();
+    // Writes the local-qwen provider into OpenCode's config (T3 Code's OpenCode driver then lists the model).
+    public void ConnectOpenCode()
+    {
+        string? problem;
+        try { problem = connectOpenCode(host.Loaded()?.Context ?? Math.Min(settings.Choice.Context, Policy.Ctx128)); }
+        catch (Exception ex) { problem = ex.Message; }
+        if (problem is null) icon.ShowBalloonTip(6000, "Local Qwen", "OpenCode is connected. In T3 Code add an OpenCode provider: Binary path \"opencode\", Server URL empty.", ToolTipIcon.Info);
+        else Report(new InvalidOperationException(problem));
         RefreshView();
     }
     public void SetSlots(int slots) => ApplyChoice(() => settings.ParallelRequests = slots);
@@ -245,6 +265,10 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
             modelMenu.DropDownItems.Add(item);
         }
         autostartItem.Checked = getAutostart();
+        var oc = OpenCodeStatus;
+        openCodeItem.Text = oc == "Connected" ? "OpenCode (T3 Code): connected — refresh" : UiSpec.MenuLabels[10];
+        openCodeItem.Checked = oc == "Connected";
+        openCodeItem.Enabled = oc != "Not installed";
         if (s == TrayState.Error && ErrorText != lastBalloon)
         {
             lastBalloon = ErrorText;

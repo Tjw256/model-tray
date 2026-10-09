@@ -178,6 +178,19 @@ internal static class BoundaryTests
         SelfTests.Check("engine gets a slot save path for sessions",argText.Contains("--slot-save-path"));
         var two=string.Join(" ",(string[])argsMethod.Invoke(null,new object?[]{"m.gguf",null,131072,"log.txt",null,2})!);
         SelfTests.Check("two slots run with one shared KV pool", two.Contains("-np 2 --kv-unified") && argText.Contains("-np 1") && !argText.Contains("--kv-unified"));
+        var ocDir=Path.Combine(Path.GetTempPath(),"localqwen-opencode-"+Guid.NewGuid()); Directory.CreateDirectory(ocDir);
+        var oc=Path.Combine(ocDir,"opencode.json");
+        File.WriteAllText(oc,"{\"$schema\":\"https://opencode.ai/config.json\",\"provider\":{\"ollama\":{\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"baseURL\":\"http://127.0.0.1:11434/v1\"}}}}");
+        SelfTests.Check("OpenCode starts unconnected",!OpenCodeClient.IsConnected(oc));
+        SelfTests.Check("connecting writes the local-qwen provider",OpenCodeClient.Connect("k-123",98304,oc) is null && OpenCodeClient.IsConnected(oc));
+        var ocText=File.ReadAllText(oc);
+        SelfTests.Check("existing OpenCode providers are kept and a backup is made",ocText.Contains("11434") && ocText.Contains("\"apiKey\": \"k-123\"") && ocText.Contains("98304") && File.Exists(oc+".before-local-qwen"));
+        OpenCodeClient.UpdateContext(131072,oc);
+        SelfTests.Check("OpenCode's context limit follows the loaded context",File.ReadAllText(oc).Contains("131072") && !File.ReadAllText(oc).Contains("98304"));
+        File.WriteAllText(oc,"{ // my comment\n \"provider\": {} }");
+        SelfTests.Check("an OpenCode config with comments is never rewritten",OpenCodeClient.Connect("k",131072,oc) is string && File.ReadAllText(oc).Contains("// my comment"));
+        File.Delete(oc); SelfTests.Check("a missing OpenCode config is created",OpenCodeClient.Connect("k",131072,oc) is null && OpenCodeClient.IsConnected(oc));
+        Directory.Delete(ocDir,true);
         SelfTests.Check("secret redaction",!Secrets.Redact("Bearer xyz test-secret-value","test-secret-value").Contains("xyz"));
     }
 }

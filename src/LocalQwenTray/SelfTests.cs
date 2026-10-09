@@ -90,7 +90,7 @@ internal static class SelfTests
             GatewayTests.Run().GetAwaiter().GetResult();
             Check("tray launch only listens; it does not load the model", !UiSpec.StartsModelOnLaunch);
             Check("quitting the tray unloads the model it serves", UiSpec.StopsModelOnExit);
-            Check("tray menu", UiSpec.MenuLabels.SequenceEqual(new[] {"Local Qwen","Load now","Context","Model","Reasoning","Parallel requests","Unload when idle","Start with Windows","Copy API endpoint","Copy API key","Open log","Open config folder","Quit Local Qwen"}));
+            Check("tray menu", UiSpec.MenuLabels.SequenceEqual(new[] {"Local Qwen","Load now","Context","Model","Reasoning","Parallel requests","Unload when idle","Start with Windows","Copy API endpoint","Copy API key","Connect OpenCode (T3 Code)","Open log","Open config folder","Quit Local Qwen"}));
             Check("default choice is Q5_K_M at 128K and settings fall back safely", LaunchChoice.Default == new LaunchChoice("q5_K_M", 131072, 2) && new AppSettings { ContextTokens = 999, Variant = "bogus", ParallelRequests = 7 }.Choice == LaunchChoice.Default);
             Check("gateway owns the public port; engine is private", Policy.PublicPort == 8000 && Policy.BackendPort != Policy.PublicPort);
             Check("default auto-unload is 5 minutes and Never is offered", Policy.DefaultIdleMinutes == 5 && Policy.IdleChoices.Contains(null) && new AppSettings().IdleMinutes == 5);
@@ -101,7 +101,7 @@ internal static class SelfTests
             Check("duplicate tray rejected", first.IsFirst && !second.IsFirst);
             Check("private logs", new SafeLog("test").Path == Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"LocalQwen","tray.log") && new SafeLog("test", "X:\\t").Path == Path.Combine("X:\\t", "tray.log"));
             Check("default launch tray only", Entry.Mode([]) == "tray");
-            Check("explicit CLI modes", Entry.Mode(["--start"]) == "--start" && Entry.Mode(["--stop"]) == "--stop" && Entry.Mode(["--write-icon", "x.ico"]) == "--write-icon");
+            Check("explicit CLI modes", Entry.Mode(["--start"]) == "--start" && Entry.Mode(["--stop"]) == "--stop" && Entry.Mode(["--write-icon", "x.ico"]) == "--write-icon" && Entry.Mode(["--connect-opencode"]) == "--connect-opencode");
         }
         catch (Exception ex) { Results.Add(ex.Message); result = 1; }
         string report = string.Join(Environment.NewLine,Results);

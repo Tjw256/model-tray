@@ -23,7 +23,8 @@ internal sealed class StatusPanel : Form
     readonly Panel dot = new();
     readonly Button primary = new(), logs = new(), copy = new();
     readonly ComboBox idle = new(), contextBox = new(), modelBox = new(), reasoningBox = new(), slotsBox = new();
-    readonly Label modelHint = new();
+    readonly Label modelHint = new(), openCode = new();
+    readonly Button openCodeButton = new();
     readonly CheckBox autostart = new();
     readonly System.Windows.Forms.Timer refresh = new() { Interval = 1000 };
     readonly string endpoint = $"http://127.0.0.1:{Policy.PublicPort}/v1";
@@ -88,6 +89,9 @@ internal sealed class StatusPanel : Form
         slotsBox.SelectedIndexChanged += (_, _) => { if (!updating) actions.SetSlots(Policy.SlotChoices[slotsBox.SelectedIndex]); };
         Row("Parallel", slotsBox);
         lastReply.AutoSize = true; Row("Last reply", lastReply);
+        openCode.AutoSize = true; Style(openCodeButton, false, "Connect"); openCodeButton.AutoSize = true; openCodeButton.Margin = new Padding(D(6), D(1), 0, D(1));
+        openCodeButton.Click += (_, _) => actions.ConnectOpenCode();
+        Row("OpenCode / T3", openCode, openCodeButton);
         Combo(idle);
         foreach (var m in Policy.IdleChoices) idle.Items.Add(IdleText(m));
         idle.SelectedIndexChanged += (_, _) => { if (!updating) actions.SetIdle(Policy.IdleChoices[idle.SelectedIndex]); };
@@ -148,6 +152,9 @@ internal sealed class StatusPanel : Form
             lastReply.Text = r is null ? "—" : $"{r.TokensPerSecond:F0} tok/s · {r.Tokens} tokens · {Ago(DateTimeOffset.Now - r.At)}";
             idle.SelectedIndex = Array.IndexOf(Policy.IdleChoices, actions.IdleMinutes) is var i and >= 0 ? i : 1;
             autostart.Checked = actions.Autostart;
+            var oc = actions.OpenCodeStatus;
+            openCode.Text = oc; openCode.ForeColor = oc == "Connected" ? TrayIcons.StateColor(TrayState.Ready) : p.Muted;
+            openCodeButton.Text = oc == "Connected" ? "Refresh" : "Connect"; openCodeButton.Enabled = oc != "Not installed";
             var choice = actions.Choice;
             contextBox.SelectedIndex = Math.Max(0, Array.IndexOf(Policy.ContextChoices, choice.Context));
             reasoningBox.SelectedIndex = Math.Max(0, Array.IndexOf(Policy.ReasoningChoices, actions.Reasoning));

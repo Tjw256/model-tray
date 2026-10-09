@@ -56,7 +56,7 @@ Ollama and plain llama.cpp ran at about the same speed. The gain comes from sett
 ### The tray
 
 - **Icon dot:** grey = sleeping, amber = loading, green = ready, blue = generating, red = needs attention.
-- **Left-click** opens the status panel (shown above). **Right-click** gives the same actions as a menu: Load/Unload now, Context, Model, Reasoning, Parallel requests, Unload when idle, Start with Windows, Copy API endpoint, Copy API key, Open log, Open config folder, Quit.
+- **Left-click** opens the status panel (shown above). **Right-click** gives the same actions as a menu: Load/Unload now, Context, Model, Reasoning, Parallel requests, Unload when idle, Start with Windows, Copy API endpoint, Copy API key, Connect OpenCode (T3 Code), Open log, Open config folder, Quit.
 - Quitting the tray also unloads the model, since clients can't reach it without the tray.
 
 ## Requirements
@@ -81,6 +81,14 @@ Ollama and plain llama.cpp ran at about the same speed. The gain comes from sett
 3. **Add llama.cpp**: unzip the llama.cpp build (plus the cudart zip if needed) into `publish\llama.cpp\`, so that `publish\llama.cpp\llama-server.exe` exists.
 4. **Run** `publish\LocalQwenTray.exe`. On first run it creates `%LOCALAPPDATA%\LocalQwen\config.json` with a random API key.
 5. **Point your client** at `http://127.0.0.1:8000/v1`. Use **Copy API key** in the tray menu for the key, and the model name `qwen3.8-27b-uncensored-q5_k_m`; any name works, since there is one model per server. Enable **Start with Windows** in the tray if you want it there from login.
+
+## Use with OpenCode and T3 Code
+
+[OpenCode](https://opencode.ai) and T3 Code's OpenCode driver can use the tray as a provider.
+
+1. Click **Connect OpenCode (T3 Code)** in the tray menu, or run `LocalQwenTray.exe --connect-opencode`. This adds a `local-qwen` provider to `~/.config/opencode/opencode.json` (with the endpoint, key, vision, reasoning, tool calls and context limit) and keeps every other provider; the original file is backed up once as `opencode.json.before-local-qwen`. A config with comments is never rewritten. The tray keeps the context limit in step with what is actually loaded.
+2. In **T3 Code → Add provider instance → OpenCode**, set **Binary path** to `opencode` and leave **Server URL** and **Server password empty**, so T3 starts OpenCode itself. (Server URL is the address of an *OpenCode server*, not of the model.)
+3. Pick the model `local-qwen/qwen3.8-27b-uncensored-q5_k_m`.
 
 ## Configuration
 

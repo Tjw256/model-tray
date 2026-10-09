@@ -13,6 +13,8 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
     readonly string key = config.ApiKey;
     public string Executable => Path.GetFullPath(config.LlamaServer);
     public LaunchChoice Choice { get; set; } = LaunchChoice.Default;
+    // Called with the allocated context after each verified load (the tray keeps OpenCode's limit in step).
+    public Action<int>? ContextLoaded { get; set; }
     public EngineShape? Loaded() => ReadIdentity() is { } id && Valid(id) ? new(id.Variant ?? Policy.DefaultVariant, id.ContextTokens, Math.Max(1, id.Slots)) : null;
     string StateDirectory => stateDirectory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"LocalQwen");
     public string StatePath => Path.Combine(StateDirectory,"native-process.json");
@@ -201,6 +203,7 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
     {
         var match = Regex.Match(probe.Detail, @"^context (\d+) tokens$");
         if (!probe.Ready || !match.Success) throw new InvalidOperationException("Model loaded but actual context unavailable; client metadata was not updated");
+        try { ContextLoaded?.Invoke(int.Parse(match.Groups[1].Value)); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException) { }
         // Optional hook (config ClientSyncCommand) that tells clients the allocated context; runs only when it changed.
         if (config.ClientSyncCommand is not { Length: > 0 } command) return;
         var marker = Path.Combine(StateDirectory, "client-context-synced.txt");

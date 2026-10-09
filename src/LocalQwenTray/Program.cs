@@ -38,8 +38,14 @@ internal static class Program
             Policy.Model = config.ModelName;
             OllamaModels.Repository = config.OllamaRepository;
             log = new SafeLog(key);
+            if (mode == "--connect-opencode")
+            {
+                var problem = OpenCodeClient.Connect(key, Policy.Ctx128);
+                Console.WriteLine(problem ?? $"OpenCode connected: provider '{OpenCodeClient.ProviderId}' -> {OpenCodeClient.Endpoint} in {OpenCodeClient.ConfigPath}");
+                return problem is null ? 0 : 1;
+            }
             using var http = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = Timeout.InfiniteTimeSpan };
-            var host = new NativeHost(config, new ProcessRunner(), http);
+            var host = new NativeHost(config, new ProcessRunner(), http) { ContextLoaded = context => OpenCodeClient.UpdateContext(context) };
             var controller = new Controller(host);
             if (mode != "tray")
             {
