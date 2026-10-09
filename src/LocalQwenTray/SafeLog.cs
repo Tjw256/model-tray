@@ -2,7 +2,7 @@ namespace LocalQwenTray;
 // Tests pass their own directory so they never write into the real tray.log.
 internal sealed class SafeLog(string key, string? directory = null)
 {
-    public string Path => System.IO.Path.Combine(directory ?? System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LocalQwen"), "tray.log");
+    public string Path => System.IO.Path.Combine(directory ?? AppConfig.DefaultDirectory, "tray.log");
     public string Redact(string text) => Secrets.Redact(text, key);
     public void Write(string text)
     {

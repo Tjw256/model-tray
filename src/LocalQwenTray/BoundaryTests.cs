@@ -34,7 +34,7 @@ internal static class BoundaryTests
         var detached=typeof(NativeHost).Assembly.GetType("LocalQwenTray.DetachedNative");
         SelfTests.Check("native child cannot inherit CLI capture pipes",detached is not null);
         var start=detached!.GetMethod("Start");
-        var info=new System.Diagnostics.ProcessStartInfo("C:/Program Files/dotnet/dotnet.exe"){UseShellExecute=false};
+        var info=new System.Diagnostics.ProcessStartInfo(Environment.GetEnvironmentVariable("MODEL_TRAY_TEST_DOTNET") ?? "C:/Program Files/dotnet/dotnet.exe"){UseShellExecute=false};
         info.ArgumentList.Add("--version");
         using(var child=(System.Diagnostics.Process)start!.Invoke(null,new object[]{info})!)
         {using var bounded=new CancellationTokenSource(5000);await child.WaitForExitAsync(bounded.Token);SelfTests.Check("detached native process runs without inherited stdio, exit="+child.ExitCode,child.ExitCode==0);}
@@ -164,6 +164,14 @@ internal static class BoundaryTests
         SelfTests.Check("unload saves the open conversation through llama-server's slot API",sessionHandler.SlotCalls.Count==1 && sessionHandler.SlotCalls[0].StartsWith("/slots/0?action=save") && sessionHandler.SlotCalls[0].Contains("session-0.bin") && File.ReadAllText(infoPath).Contains("\"Variant\":\"q5_K_M\"") && File.ReadAllText(infoPath).Contains("131072"));
         await sessionHost.RestoreSession(default);
         SelfTests.Check("a compatible engine restores the saved conversation",sessionHandler.SlotCalls.Count==2 && sessionHandler.SlotCalls[1].StartsWith("/slots/0?action=restore"));
+        var compatibleSession = File.ReadAllText(infoPath);
+        File.WriteAllText(infoPath,compatibleSession.Replace("\"SpeculativeDecoding\":true", "\"SpeculativeDecoding\":false"));
+        await sessionHost.RestoreSession(default);
+        SelfTests.Check("a different speculation mode cannot restore the old cache",sessionHandler.SlotCalls.Count==2);
+        File.WriteAllText(infoPath,compatibleSession.Replace("\"Fingerprint\":null", "\"Fingerprint\":\"different-engine-arguments\""));
+        await sessionHost.RestoreSession(default);
+        SelfTests.Check("different native binary or arguments cannot restore the old cache",sessionHandler.SlotCalls.Count==2);
+        File.WriteAllText(infoPath,compatibleSession);
         File.WriteAllText(infoPath,File.ReadAllText(infoPath).Replace("\"q5_K_M\"","\"q4_K_M\""));
         await sessionHost.RestoreSession(default);
         SelfTests.Check("a different model variant never gets another's saved state",sessionHandler.SlotCalls.Count==2);

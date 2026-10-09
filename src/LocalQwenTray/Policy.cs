@@ -15,10 +15,24 @@ internal static class Policy
     public static readonly int?[] IdleChoices = [1, 5, 15, 30, 60, null];
     // 256K is the model's trained context (n_ctx_train 262144); going beyond needs YaRN and degrades recall.
     public const int Ctx64 = 65536, Ctx96 = 98304, Ctx128 = 131072, Ctx256 = 262144;
-    public static readonly int[] ContextChoices = [Ctx128, Ctx256];
+    public static bool VulkanProfile { get; private set; }
+    public static bool GpuVision { get; private set; } = true;
+    public static bool GpuSpeculative { get; private set; } = true;
+    public static int[] ContextChoices { get; private set; } = [Ctx128, Ctx256];
+    public static void ConfigureGpu(string device, bool vision = true, bool speculative = true)
+    {
+        if (device != "CUDA0" && !System.Text.RegularExpressions.Regex.IsMatch(device, @"^Vulkan\d+$"))
+            throw new InvalidOperationException("Unsupported GPU device: " + device);
+        VulkanProfile = device.StartsWith("Vulkan", StringComparison.Ordinal);
+        GpuVision = vision;
+        GpuSpeculative = speculative;
+        ContextChoices = VulkanProfile ? [8192, 16384, 32768, Ctx64] : [Ctx128, Ctx256];
+        FallbackContexts = VulkanProfile ? [Ctx64, 32768, 16384, 8192] : [Ctx256, Ctx128, Ctx96, Ctx64];
+    }
     // When the chosen context does not fit (e.g. a video editor holds VRAM), the largest smaller one that fits is used.
-    public static readonly int[] FallbackContexts = [Ctx256, Ctx128, Ctx96, Ctx64];
-    public const int ContextCap = Ctx256, MinimumContext = Ctx64;
+    public static int[] FallbackContexts = [Ctx256, Ctx128, Ctx96, Ctx64];
+    public const int ContextCap = Ctx256;
+    public static int MinimumContext => VulkanProfile ? 8192 : Ctx64;
     // Two slots share one KV pool (--kv-unified; each can still use the whole context). A short request no longer
     // waits behind a long one: 12.7 s -> 1.2 s while a cached background conversation generated, which ran 7% slower
     // (2026-10-09). The second slot costs ~0.8 GiB (measured 777 MiB).
@@ -29,7 +43,7 @@ internal static class Policy
     // tokens there vs 70-90% in answers; "low" measured 10-20% faster than the template default "xhigh" (2026-10-09).
     public static readonly string[] ReasoningChoices = ["low", "medium", "xhigh"];
     public const string DefaultReasoning = "medium";   // owner choice 2026-10-09: balance of speed and thoroughness
-    public static readonly string[] Variants = ["q5_K_M", "q4_K_M"];
+    public static readonly string[] Variants = ["q5_K_M", "q4_K_M", "iq2_xxs"];
     // Whole-engine VRAM for Q5_K_M with the vision projector: 128K measured 25,042 MiB (2026-10-08); 256K measured
     // 28,531 MiB (2026-10-09, 17.6 s load, 157.5 tok/s, no spill). Below 128K the KV cache shrinks by ~22 MiB per
     // 1K tokens; 20 is used so smaller contexts are never over-promised. A lighter quant needs less by roughly its
@@ -44,13 +58,25 @@ internal static class Policy
     // into system RAM, so loads are checked up front instead. CUDA does not evict other apps' VRAM.
     public static int Need(int context, int weightSavingMiB, int slots = 1)
     {
+        // RX 9070 XT / IQ2_XXS, batch 256, no checkpoints, Q4 main+draft KV.
+        // Text-only MTP5 at 32K physically used 10,573 MiB. MTP1 retains
+        // four fewer recurrent states (~599 MiB); keep 960 MiB overhead,
+        // 19 MiB/1K for main+draft Q4 KV and unchanged 400+512 MiB margins.
+        // The final process also has to pass the physical Windows residency gate.
+        if (VulkanProfile)
+            // Plain RX 9070 XT / IQ2_XXS with two slots measured 9,189 MiB at
+            // 32K and 9,758 MiB at 64K (84 MiB shared). File-weight accounting
+            // already exceeds GPU weight allocation;
+            // 128 MiB overhead plus the unchanged margins and slot allowance
+            // projects ~10.7 GiB at 64K. Keep the physical residency gate.
+            return ReferenceWeightsMiB - weightSavingMiB + (GpuSpeculative ? 960 : 128) + (GpuVision ? 1148 : 0) + context / 1024 * (GpuSpeculative ? 19 : 18) + MarginMiB + (Math.Max(1, slots) - 1) * SlotOverheadMiB;
         int engine = context >= Ctx256 ? Q5Need256 : context >= Ctx128 ? Q5Need128 : Q5Need128 - (Ctx128 - context) / 1024 * MiBPer1KBelow128;
         return engine - weightSavingMiB + MarginMiB + (Math.Max(1, slots) - 1) * SlotOverheadMiB;
     }
     public static int MinimumBudgetMiB => Need(Ctx64, 0);
     public static int Budget(GpuMemory memory)
     {
-        if (memory.TotalMiB <= 0 || memory.FreeMiB < 0 || memory.FreeMiB > memory.TotalMiB) throw new InvalidOperationException("Invalid NVIDIA GPU memory snapshot");
+        if (memory.TotalMiB <= 0 || memory.FreeMiB < 0 || memory.FreeMiB > memory.TotalMiB) throw new InvalidOperationException("Invalid GPU memory snapshot");
         return memory.FreeMiB - HeadroomMiB;
     }
     // Largest context (up to the preferred one) that fits, keeping two slots where possible; refuse (never spill to
@@ -60,7 +86,7 @@ internal static class Policy
         foreach (var context in FallbackContexts.Where(c => c <= preferredContext))
             foreach (var slots in preferredSlots > 1 ? new[] { preferredSlots, 1 } : new[] { 1 })
                 if (budget >= Need(context, weightSavingMiB, slots)) return (context, slots);
-        throw new InvalidOperationException($"Insufficient free VRAM: {budget + HeadroomMiB} MiB free; need {Need(Ctx64, weightSavingMiB) + HeadroomMiB} MiB for the GPU-only runtime with a {Ctx64 / 1024}K context. CPU offload and MTP downgrade are disabled. Close GPU-heavy apps (games, video editors) or unload Ollama models yourself, then retry. Nothing was automatically closed.");
+        throw new InvalidOperationException($"Insufficient free VRAM: {budget + HeadroomMiB} MiB free; need {Need(MinimumContext, weightSavingMiB) + HeadroomMiB} MiB for the GPU-only runtime with a {MinimumContext / 1024}K context. CPU offload and MTP downgrade are disabled. Close GPU-heavy apps (games, video editors) or unload Ollama models yourself, then retry. Nothing was automatically closed.");
     }
     public static int ChooseContext(int budget, int preferred, int weightSavingMiB = 0) => ChooseLaunch(budget, preferred, 1, weightSavingMiB).Context;
     public static string ContextLabel(int tokens) => $"{tokens / 1024}K";
