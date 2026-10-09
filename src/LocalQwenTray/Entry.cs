@@ -25,7 +25,7 @@ internal static class UiSmokeTests
         foreach (var s in Enum.GetValues<TrayState>()) { using var b = TrayIcons.Render(64, s); b.Save(Path.Combine(dir, $"icon-{s}.png")); }
         var host = new TestHost();
         var supervisor = new Supervisor(new Controller(host));
-        using var context = new TrayContext(supervisor, host, new SafeLog("preview"), new AppSettings(), Path.Combine(dir, "state"), null, () => true, _ => { });
+        using var context = new TrayContext(supervisor, host, new SafeLog("preview", Path.Combine(dir, "state")), new AppSettings(), Path.Combine(dir, "state"), null, () => true, _ => { });
         void Shot(string name)
         {
             context.TogglePanel();
@@ -59,7 +59,7 @@ internal static class UiSmokeTests
         var supervisor = new Supervisor(controller);
         var settings = new AppSettings();
         bool autostart = false;
-        using var context = new TrayContext(supervisor, host, new SafeLog("test-secret-value"), settings, dir, null, () => autostart, v => autostart = v, () => ["q5_K_M", "q4_K_M"]);
+        using var context = new TrayContext(supervisor, host, new SafeLog("test-secret-value", dir), settings, dir, null, () => autostart, v => autostart = v, () => ["q5_K_M", "q4_K_M"]);
         using var timer = new System.Windows.Forms.Timer { Interval = 300 };
         int result = 0;
         timer.Tick += async (_, _) =>
@@ -135,7 +135,7 @@ internal static class UiSmokeTests
         {
             var loadedHost = new TestHost { State = new(true, true, 0), Health = new(true) };
             var loadedSupervisor = new Supervisor(new Controller(loadedHost));
-            using var loadedContext = new TrayContext(loadedSupervisor, loadedHost, new SafeLog("test-secret-value"), new AppSettings(), dir, null, () => false, _ => { });
+            using var loadedContext = new TrayContext(loadedSupervisor, loadedHost, new SafeLog("test-secret-value", dir), new AppSettings(), dir, null, () => false, _ => { });
             using var exitTimer = new System.Windows.Forms.Timer { Interval = 200 };
             exitTimer.Tick += (_, _) => { exitTimer.Stop(); Item(loadedContext, UiSpec.MenuLabels[10]).PerformClick(); };
             exitTimer.Start(); Application.Run(loadedContext);
