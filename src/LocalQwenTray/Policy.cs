@@ -64,7 +64,12 @@ internal static class Policy
         // 19 MiB/1K for main+draft Q4 KV and unchanged 400+512 MiB margins.
         // The final process also has to pass the physical Windows residency gate.
         if (VulkanProfile)
-            return ReferenceWeightsMiB - weightSavingMiB + (GpuSpeculative ? 960 : 896) + (GpuVision ? 1148 : 0) + context / 1024 * (GpuSpeculative ? 19 : 18) + MarginMiB + (Math.Max(1, slots) - 1) * SlotOverheadMiB;
+            // Plain RX 9070 XT / IQ2_XXS with two slots measured 9,189 MiB at
+            // 32K and 9,758 MiB at 64K (84 MiB shared). File-weight accounting
+            // already exceeds GPU weight allocation;
+            // 128 MiB overhead plus the unchanged margins and slot allowance
+            // projects ~10.7 GiB at 64K. Keep the physical residency gate.
+            return ReferenceWeightsMiB - weightSavingMiB + (GpuSpeculative ? 960 : 128) + (GpuVision ? 1148 : 0) + context / 1024 * (GpuSpeculative ? 19 : 18) + MarginMiB + (Math.Max(1, slots) - 1) * SlotOverheadMiB;
         int engine = context >= Ctx256 ? Q5Need256 : context >= Ctx128 ? Q5Need128 : Q5Need128 - (Ctx128 - context) / 1024 * MiBPer1KBelow128;
         return engine - weightSavingMiB + MarginMiB + (Math.Max(1, slots) - 1) * SlotOverheadMiB;
     }

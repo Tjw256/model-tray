@@ -26,6 +26,7 @@ internal static class AmdTests
             SelfTests.Check("AMD limits retained recurrent states and quantizes draft KV explicitly", text.Contains("--ctx-checkpoints 0") && text.Contains("-b 256 -ub 256") && text.Contains("--spec-draft-type-k q4_0") && text.Contains("--spec-draft-type-v q4_0") && text.Contains("--spec-draft-n-max 1"));
             var plain = NativeHost.BuildGpuArguments("model.gguf", null, 16384, "engine.log", null, 1, "Vulkan0", false);
             SelfTests.Check("plain mode explicitly removes all speculation flags and keeps GPU", !plain.Any(x => x.StartsWith("--spec-")) && plain.Contains("--device") && plain.Contains("token_embd.weight=Vulkan0"));
+            SelfTests.Check("measured AMD plain budget retains two 64K slots", Policy.ChooseLaunch(11200,65536,2,10158) == (65536,2));
             var plainNeed = Policy.Need(65536,10000);
             Policy.ConfigureGpu("Vulkan0", false, true);
             SelfTests.Check("plain memory budget excludes the absent MTP buffers", plainNeed < Policy.Need(65536,10000));
