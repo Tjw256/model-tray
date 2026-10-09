@@ -82,7 +82,7 @@ internal static class SelfTests
             using var first = new SingleInstance(mutexName);
             using var second = new SingleInstance(mutexName);
             Check("duplicate tray rejected", first.IsFirst && !second.IsFirst);
-            Check("private logs", new SafeLog("test").Path == Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"LocalQwen","tray.log"));
+            Check("private logs", new SafeLog("test").Path == Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"LocalQwen","tray.log") && new SafeLog("test", "X:\\t").Path == Path.Combine("X:\\t", "tray.log"));
             Check("default launch tray only", Entry.Mode([]) == "tray");
             Check("explicit CLI modes", Entry.Mode(["--start"]) == "--start" && Entry.Mode(["--stop"]) == "--stop" && Entry.Mode(["--write-icon", "x.ico"]) == "--write-icon");
         }
