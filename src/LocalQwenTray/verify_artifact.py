@@ -13,6 +13,7 @@ import subprocess
 import time
 
 root = Path(__file__).resolve().parent
+state_dir = Path(os.environ.get("MODEL_TRAY_HOME", str(Path(os.environ["LOCALAPPDATA"]) / "LocalQwen")))
 exe = root / "publish" / "LocalQwenTray.exe"
 data = exe.read_bytes()
 pe = struct.unpack_from("<I", data, 0x3C)[0]
@@ -22,7 +23,7 @@ print("PASS published EXE is Windows GUI subsystem (no automatic console)")
 
 
 def state():
-    ledger = Path(os.environ["LOCALAPPDATA"]) / "LocalQwen/native-process.json"
+    ledger = state_dir / "native-process.json"
     return {"ledger": ledger.read_text() if ledger.exists() else None}
 
 
@@ -56,11 +57,15 @@ try:
     assert before == after, "Qwen state changed during read-only verification (check concurrent controller activity)"
     print("PASS default tray launch leaves actual native Qwen ownership state unchanged")
     print("Observed native state:", json.dumps(after))
-    config = Path(os.environ["LOCALAPPDATA"]) / "LocalQwen" / "config.json"
+    config = state_dir / "config.json"
     assert config.exists(), "Expected config.json after the first tray run"
     key = json.loads(config.read_text(encoding="utf-8-sig"))["ApiKey"]  # utf-8-sig tolerates a BOM (e.g. saved from Notepad)
     assert key, "config.json has no ApiKey"
-    log = Path(os.environ["LOCALAPPDATA"]) / "LocalQwen" / "tray.log"
+    log = state_dir / "tray.log"
+    deadline = time.monotonic() + 15
+    while not log.exists() and time.monotonic() < deadline:
+        assert first.poll() is None, "Tray exited before gateway initialization"
+        time.sleep(0.1)
     assert log.exists(), "Expected private per-user runtime log"
     for target in (log, Path(str(log) + ".previous")):
         if target.exists():

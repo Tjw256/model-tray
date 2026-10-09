@@ -34,6 +34,7 @@ internal static class Program
             using var instance = mode == "tray" ? new SingleInstance("Local\\LocalQwenTray." + System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value) : null;
             if (instance is { IsFirst: false }) return 0;
             var config = AppConfig.LoadOrCreate();
+            Policy.ConfigureGpu(config.GpuDevice, config.EnableVision, config.SpeculativeDecoding);
             var key = config.ApiKey;
             Policy.Model = config.ModelName;
             OllamaModels.Repository = config.OllamaRepository;
@@ -81,7 +82,7 @@ internal static class Program
                 log.Write(eventArgs.Exception.ToString());
                 MessageBox.Show(log.Redact(eventArgs.Exception.Message), "Local Qwen error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             };
-            var stateDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LocalQwen");
+            var stateDirectory = AppConfig.DefaultDirectory;
             var settings = AppSettings.Load(stateDirectory);
             host.Choice = settings.Choice;
             var supervisor = new Supervisor(controller, sessions: host) { IdleTimeout = settings.IdleMinutes is int minutes ? TimeSpan.FromMinutes(minutes) : null };
