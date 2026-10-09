@@ -90,6 +90,28 @@ Ollama and plain llama.cpp ran at about the same speed. The gain comes from sett
 2. In **T3 Code → Add provider instance → OpenCode**, set **Binary path** to `opencode` and leave **Server URL** and **Server password empty**, so T3 starts OpenCode itself. (Server URL is the address of an *OpenCode server*, not of the model.)
 3. Pick the model `local-qwen/qwen3.8-27b-uncensored-q5_k_m`.
 
+## Use Qwen as a sub-agent (MCP)
+
+`LocalQwenTray.exe --mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server on stdin/stdout. Any MCP-capable agent can then delegate work to the local model. It goes through the tray's gateway, so the model loads on demand, your reasoning setting applies, and with two slots it doesn't block your other Qwen work. Tools:
+
+- `ask_local_qwen(prompt, system?, reasoning?, max_tokens?)`: drafts, summaries, rewrites, simple code, second opinions. `reasoning` is `off` / `low` / `medium` / `xhigh`.
+- `ask_local_qwen_about_image(image_path, prompt, ...)`: vision questions about a local image file.
+- `local_qwen_status()`: whether the tray is reachable, plus model and context.
+
+Register it with your agent (use the full path to your published exe). The first call can take about 25 s while the model loads, so allow a generous tool timeout:
+
+- **Codex** (`~/.codex/config.toml`):
+  ```toml
+  [mcp_servers.local-qwen]
+  command = 'C:\path\to\LocalQwenTray.exe'
+  args = ["--mcp"]
+  tool_timeout_sec = 600
+  ```
+- **Claude Code**: `claude mcp add local-qwen -- "C:\path\to\LocalQwenTray.exe" --mcp`
+- **OpenCode** (`opencode.json`): `"mcp": { "local-qwen": { "type": "local", "command": ["C:\path\to\LocalQwenTray.exe", "--mcp"] } }`
+
+Then tell the agent when to use it, for example: *"Use ask_local_qwen for first drafts and summaries."*
+
 ## Configuration
 
 `%LOCALAPPDATA%\LocalQwen\config.json` (open it with **Open config folder**; see `config.example.json`):

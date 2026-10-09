@@ -8,7 +8,7 @@ internal static class Entry
         {
             if (args[i] == "--write-icon") { if (++i >= args.Length) throw new ArgumentException("--write-icon requires a path"); mode = "--write-icon"; continue; }
             if (args[i] == "--ui-preview") { if (++i >= args.Length) throw new ArgumentException("--ui-preview requires a folder"); mode = "--ui-preview"; continue; }
-            if (args[i] is not ("--start" or "--stop" or "--status" or "--connect-opencode" or "--self-test" or "--process-test" or "--ui-smoke-test")) throw new ArgumentException("Unknown argument: " + args[i]);
+            if (args[i] is not ("--start" or "--stop" or "--status" or "--connect-opencode" or "--mcp" or "--self-test" or "--process-test" or "--ui-smoke-test")) throw new ArgumentException("Unknown argument: " + args[i]);
             if (mode != "tray") throw new ArgumentException("Choose only one command mode");
             mode = args[i];
         }

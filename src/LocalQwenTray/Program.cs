@@ -38,6 +38,14 @@ internal static class Program
             Policy.Model = config.ModelName;
             OllamaModels.Repository = config.OllamaRepository;
             log = new SafeLog(key);
+            if (mode == "--mcp")
+            {
+                // MCP server on stdin/stdout for agents; no tray, no window, logs only to the private log file.
+                Console.InputEncoding = Console.OutputEncoding = new System.Text.UTF8Encoding(false);
+                using var mcpHttp = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = Timeout.InfiniteTimeSpan };
+                new McpServer(key, OpenCodeClient.Endpoint, mcpHttp).Run(Console.In, Console.Out).GetAwaiter().GetResult();
+                return 0;
+            }
             if (mode == "--connect-opencode")
             {
                 var problem = OpenCodeClient.Connect(key, Policy.Ctx128);

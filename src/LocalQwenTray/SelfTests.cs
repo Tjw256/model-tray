@@ -88,6 +88,7 @@ internal static class SelfTests
             SessionLifecycle().GetAwaiter().GetResult();
             BoundaryTests.Run().GetAwaiter().GetResult();
             GatewayTests.Run().GetAwaiter().GetResult();
+            McpTests.Run().GetAwaiter().GetResult();
             Check("tray launch only listens; it does not load the model", !UiSpec.StartsModelOnLaunch);
             Check("quitting the tray unloads the model it serves", UiSpec.StopsModelOnExit);
             Check("tray menu", UiSpec.MenuLabels.SequenceEqual(new[] {"Local Qwen","Load now","Context","Model","Reasoning","Parallel requests","Unload when idle","Start with Windows","Copy API endpoint","Copy API key","Connect OpenCode (T3 Code)","Open log","Open config folder","Quit Local Qwen"}));
@@ -101,7 +102,7 @@ internal static class SelfTests
             Check("duplicate tray rejected", first.IsFirst && !second.IsFirst);
             Check("private logs", new SafeLog("test").Path == Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"LocalQwen","tray.log") && new SafeLog("test", "X:\\t").Path == Path.Combine("X:\\t", "tray.log"));
             Check("default launch tray only", Entry.Mode([]) == "tray");
-            Check("explicit CLI modes", Entry.Mode(["--start"]) == "--start" && Entry.Mode(["--stop"]) == "--stop" && Entry.Mode(["--write-icon", "x.ico"]) == "--write-icon" && Entry.Mode(["--connect-opencode"]) == "--connect-opencode");
+            Check("explicit CLI modes", Entry.Mode(["--start"]) == "--start" && Entry.Mode(["--stop"]) == "--stop" && Entry.Mode(["--write-icon", "x.ico"]) == "--write-icon" && Entry.Mode(["--connect-opencode"]) == "--connect-opencode" && Entry.Mode(["--mcp"]) == "--mcp");
         }
         catch (Exception ex) { Results.Add(ex.Message); result = 1; }
         string report = string.Join(Environment.NewLine,Results);
