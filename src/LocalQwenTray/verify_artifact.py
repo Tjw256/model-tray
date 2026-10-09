@@ -58,7 +58,7 @@ try:
     print("Observed native state:", json.dumps(after))
     config = Path(os.environ["LOCALAPPDATA"]) / "LocalQwen" / "config.json"
     assert config.exists(), "Expected config.json after the first tray run"
-    key = json.loads(config.read_text(encoding="utf-8"))["ApiKey"]
+    key = json.loads(config.read_text(encoding="utf-8-sig"))["ApiKey"]  # utf-8-sig tolerates a BOM (e.g. saved from Notepad)
     assert key, "config.json has no ApiKey"
     log = Path(os.environ["LOCALAPPDATA"]) / "LocalQwen" / "tray.log"
     assert log.exists(), "Expected private per-user runtime log"

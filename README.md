@@ -44,6 +44,7 @@ Ollama and plain llama.cpp ran at about the same speed. The gain comes from sett
 - **Always listening, loaded on demand.** The tray starts at login and holds port 8000. The first real request starts `llama-server`; the request waits about 20–25 s for the load and then streams normally. After the idle timeout (default 5 min; 1/5/15/30/60 min or never) the model is unloaded. Model-list and health requests never wake the GPU, and several first requests at once share a single load.
 - **Uses Ollama's downloads in place.** It reads Ollama's manifests and loads the GGUF blobs directly, so nothing is copied or converted and Ollama keeps working. Every downloaded tag of the configured model (e.g. `q5_K_M`, `q4_K_M`) appears as a choice in the tray.
 - **Vision.** If the Ollama model includes a vision projector, it is loaded with `--mmproj`, so image input works.
+- **Reasoning: Low / Medium / High.** Qwen3.8's *thinking* text is the slowest part of its output: MTP accepts only about 30% of drafted tokens there, versus 70–90% in answers, so thinking runs at about 70–100 tok/s and answers at 125–160. The tray adds the chosen effort to each chat request (default **Low**, measured 10–20% faster than the template default *xhigh*). It also drops earlier turns' thinking from the history, as Qwen's official template does, so long conversations grow more slowly. Switching takes effect on the next message, with no reload. Clients that set `reasoning_effort` or `preserve_thinking` themselves are never overridden.
 - **Context 128K or 256K.** 256K is the model's trained maximum. If there isn't enough free VRAM for 256K when the model loads, it falls back to 128K and the panel tells you why. It never spills into system RAM.
 - **Checks before and after loading.** Free VRAM is checked first, and a load that doesn't fit is refused with a clear message (HTTP 503). After loading, the log is checked to confirm that all layers, the KV cache and the MTP draft are on the GPU.
 - **Safe process ownership.** It only ever stops the `llama-server` it started, tracked by PID, start time and executable. Unknown programs on its ports are never killed.
@@ -51,14 +52,14 @@ Ollama and plain llama.cpp ran at about the same speed. The gain comes from sett
 ### The tray
 
 - **Icon dot:** grey = sleeping, amber = loading, green = ready, blue = generating, red = needs attention.
-- **Left-click** opens the status panel (shown above). **Right-click** gives the same actions as a menu: Load/Unload now, Context, Model, Unload when idle, Start with Windows, Copy API endpoint, Copy API key, Open log, Open config folder, Quit.
+- **Left-click** opens the status panel (shown above). **Right-click** gives the same actions as a menu: Load/Unload now, Context, Model, Reasoning, Unload when idle, Start with Windows, Copy API endpoint, Copy API key, Open log, Open config folder, Quit.
 - Quitting the tray also unloads the model, since clients can't reach it without the tray.
 
 ## Requirements
 
 - Windows 10/11 x64 and an NVIDIA GPU. It was built and measured on an RTX 5090 (32 GB); the default model needs about 25 GB of VRAM at 128K context, or about 28.5 GB at 256K.
 - [.NET 10 SDK](https://dotnet.microsoft.com/download) to build. The ASP.NET Core 10 runtime is needed to run it.
-- A llama.cpp **Windows CUDA** build with MTP support. Tested with release [b11429](https://github.com/ggml-org/llama.cpp/releases/tag/b11429): `llama-b11429-bin-win-cuda-13.4-x64.zip`. You may also need `cudart-llama-bin-win-cuda-13.4-x64.zip` unless the CUDA 13 runtime is already installed.
+- A llama.cpp **Windows CUDA** build with MTP support. Tested with releases [b11517](https://github.com/ggml-org/llama.cpp/releases/tag/b11517) (current; 5–14% faster on thinking text than b11429) and [b11429](https://github.com/ggml-org/llama.cpp/releases/tag/b11429): `llama-b11517-bin-win-cuda-13.4-x64.zip`. You may also need `cudart-llama-bin-win-cuda-13.4-x64.zip` unless the CUDA 13 runtime is already installed. Use a Clang-built release; MSVC builds have a known speculative-decoding slowdown on Windows ([#28218](https://github.com/ggml-org/llama.cpp/issues/28218)).
 - [Ollama](https://ollama.com), used only to download the model.
 
 ## Install
@@ -90,7 +91,7 @@ Ollama and plain llama.cpp ran at about the same speed. The gain comes from sett
 | `ModelName` | Name advertised on `/v1/models`. |
 | `ClientSyncCommand` | Optional command run after a load whose context size changed. `{context}` is replaced with the token count. Use it to update your clients' context settings. |
 
-Tray choices (context, model, idle timeout) are saved in `settings.json` in the same folder. Logs are in the same folder: `tray.log` and `native-engine.log`.
+Tray choices (context, model, reasoning, idle timeout) are saved in `settings.json` in the same folder. Logs are in the same folder: `tray.log` and `native-engine.log`.
 
 ## Customizing
 
@@ -106,6 +107,7 @@ Pull requests are welcome.
 
 - **Don't set "CUDA – Sysmem Fallback Policy: Prefer No Sysmem Fallback"** for `llama-server.exe` in the NVIDIA Control Panel. With a large model resident, it made the whole desktop lag by seconds: the mouse, typing, both monitors. Driver Default fixed it. This app checks VRAM before loading instead.
 - **Crashes with "CUDA error: an illegal memory access" during long generations** can be the GPU, not llama.cpp. Check the Windows **System** log for `nvlddmkm` events. On the development machine they were caused by an undervolt curve that boosted to an unstable clock whenever the load dipped. Capping the curve fixed it, with no speed loss.
+- **Where the time goes at long context.** At 84K tokens of conversation, answers still ran at 125–140 tok/s, but thinking dropped to 67–88. Lowering the reasoning effort helped more than compacting earlier: going from 16K to 84K costs only about 15–20%. Draft depth 5 stayed best; 2 and 3 were slower overall. An 8-bit KV cache gave no gain for +1.5 GB, and on an RTX 5090 Q4_K_M was *slower* than Q5_K_M.
 - **Prompt re-processing on hybrid models.** Qwen3.8 mixes attention and recurrent layers. Appending to a conversation is cheap, because only the new tokens are processed, but editing earlier history forces a full re-read.
 
 ## Tests

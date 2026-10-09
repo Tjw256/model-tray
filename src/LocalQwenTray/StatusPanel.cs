@@ -22,7 +22,7 @@ internal sealed class StatusPanel : Form
     readonly Label stateTitle = new(), stateDetail = new(), lastReply = new();
     readonly Panel dot = new();
     readonly Button primary = new(), logs = new(), copy = new();
-    readonly ComboBox idle = new(), contextBox = new(), modelBox = new();
+    readonly ComboBox idle = new(), contextBox = new(), modelBox = new(), reasoningBox = new();
     readonly Label modelHint = new();
     readonly CheckBox autostart = new();
     readonly System.Windows.Forms.Timer refresh = new() { Interval = 1000 };
@@ -81,6 +81,9 @@ internal sealed class StatusPanel : Form
         Row("Model", modelBox);
         modelHint.AutoSize = true; modelHint.ForeColor = p.Muted; modelHint.MaximumSize = new Size(D(250), 0);
         Row("", modelHint);
+        Combo(reasoningBox); foreach (var r in Policy.ReasoningChoices) reasoningBox.Items.Add(UiSpec.ReasoningText(r));
+        reasoningBox.SelectedIndexChanged += (_, _) => { if (!updating) actions.SetReasoning(Policy.ReasoningChoices[reasoningBox.SelectedIndex]); };
+        Row("Reasoning", reasoningBox);
         lastReply.AutoSize = true; Row("Last reply", lastReply);
         Combo(idle);
         foreach (var m in Policy.IdleChoices) idle.Items.Add(IdleText(m));
@@ -144,6 +147,7 @@ internal sealed class StatusPanel : Form
             autostart.Checked = actions.Autostart;
             var choice = actions.Choice;
             contextBox.SelectedIndex = Math.Max(0, Array.IndexOf(Policy.ContextChoices, choice.Context));
+            reasoningBox.SelectedIndex = Math.Max(0, Array.IndexOf(Policy.ReasoningChoices, actions.Reasoning));
             var installed = actions.InstalledVariants;
             if (!modelBox.Items.Cast<VariantItem>().Select(x => x.Variant).SequenceEqual(installed))
             { modelBox.Items.Clear(); foreach (var v in installed) modelBox.Items.Add(new VariantItem(v)); }

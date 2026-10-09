@@ -14,7 +14,12 @@ internal static class GatewayTests
     {
         const string key = "gw-test-key";
         int backendPort = FreePort(), publicPort = FreePort();
-        string? backendAuth = null;
+        string? backendAuth = null, backendBody = null;
+        string J(string json, string effort = "low") => Encoding.UTF8.GetString(Gateway.ApplyThinkingDefaults(Encoding.UTF8.GetBytes(json), effort));
+        SelfTests.Check("thinking defaults added to a plain chat request", J("{\"messages\":[]}") == "{\"messages\":[],\"chat_template_kwargs\":{\"reasoning_effort\":\"low\",\"preserve_thinking\":false}}");
+        SelfTests.Check("client's own reasoning effort is never overridden", J("{\"chat_template_kwargs\":{\"reasoning_effort\":\"xhigh\"}}").Contains("\"reasoning_effort\":\"xhigh\"") && !J("{\"reasoning_effort\":\"medium\"}").Contains("\"low\""));
+        SelfTests.Check("client's own preserve_thinking and enable_thinking kept", J("{\"chat_template_kwargs\":{\"preserve_thinking\":true,\"enable_thinking\":false}}").Contains("\"preserve_thinking\":true") && J("{\"chat_template_kwargs\":{\"enable_thinking\":false}}").Contains("\"enable_thinking\":false"));
+        SelfTests.Check("non-JSON or non-object bodies pass through untouched", J("not json") == "not json" && J("[1,2]") == "[1,2]");
         var fake = WebApplication.CreateSlimBuilder();
         fake.Logging.ClearProviders();
         fake.WebHost.ConfigureKestrel(o => o.Listen(IPAddress.Loopback, backendPort));
@@ -24,6 +29,7 @@ internal static class GatewayTests
             backendAuth = ctx.Request.Headers.Authorization.ToString();
             if (ctx.Request.Path == "/v1/models") { await ctx.Response.WriteAsync("{\"data\":[{\"id\":\"" + Policy.Model + "\",\"meta\":{\"n_ctx\":131072},\"live\":true}]}"); return; }
             var body = await new StreamReader(ctx.Request.Body).ReadToEndAsync();
+            backendBody = body;
             if (body.Contains("\"stream\":true"))
             {
                 ctx.Response.ContentType = "text/event-stream";
@@ -40,7 +46,8 @@ internal static class GatewayTests
         var host = new TestHost();
         var supervisor = new Supervisor(new Controller(host));
         var dir = Path.Combine(Path.GetTempPath(), "localqwen-gw-" + Guid.NewGuid());
-        await using var gateway = new Gateway(supervisor, key, publicPort, backendPort, dir);
+        string effort = "medium";
+        await using var gateway = new Gateway(supervisor, key, publicPort, backendPort, dir, null, () => effort);
         await gateway.StartAsync();
         using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{publicPort}"), Timeout = TimeSpan.FromSeconds(20) };
         HttpRequestMessage Req(HttpMethod m, string path, string? json = null, bool auth = true)
@@ -62,6 +69,10 @@ internal static class GatewayTests
             SelfTests.Check("first request loads the model on demand and is answered", r.IsSuccessStatusCode && text.Contains("echo:") && host.UpCalls == 1 && supervisor.IsReady);
         }
         SelfTests.Check("gateway authenticates to the private backend with the configured key", backendAuth == "Bearer " + key);
+        SelfTests.Check("tray reasoning setting reaches llama-server on chat requests", backendBody is not null && backendBody.Contains("\"reasoning_effort\":\"medium\"") && backendBody.Contains("\"preserve_thinking\":false"));
+        effort = "xhigh";
+        using (var r = await client.SendAsync(Req(HttpMethod.Post, "/v1/chat/completions", "{\"messages\":[]}"))) { }
+        SelfTests.Check("changing reasoning applies to the next request without a reload", backendBody!.Contains("\"reasoning_effort\":\"xhigh\"") && host.UpCalls == 1);
         SelfTests.Check("last reply speed captured from llama-server timings", supervisor.LastReply is { Tokens: 7, TokensPerSecond: 160.0 });
         using (var r = await client.SendAsync(Req(HttpMethod.Post, "/v1/chat/completions", "{\"stream\":true}"), HttpCompletionOption.ResponseHeadersRead))
         {

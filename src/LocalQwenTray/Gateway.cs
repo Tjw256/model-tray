@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -10,7 +11,8 @@ using Microsoft.Extensions.Logging;
 namespace LocalQwenTray;
 // Loopback OpenAI-compatible front door. Clients keep using http://127.0.0.1:8000/v1 with the same key;
 // the request is held while the model loads on demand, then streamed through to the private llama-server.
-internal sealed class Gateway(Supervisor supervisor, string key, int publicPort, int backendPort, string stateDirectory, Action<string>? log = null) : IAsyncDisposable
+// For chat requests it also applies the tray's thinking defaults (see ApplyThinkingDefaults).
+internal sealed class Gateway(Supervisor supervisor, string key, int publicPort, int backendPort, string stateDirectory, Action<string>? log = null, Func<string>? reasoning = null) : IAsyncDisposable
 {
     WebApplication? app;
     readonly HttpClient backend = new(new SocketsHttpHandler { UseProxy = false, AutomaticDecompression = DecompressionMethods.None, PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30) }) { Timeout = Timeout.InfiniteTimeSpan };
@@ -68,7 +70,14 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         var target = $"http://127.0.0.1:{backendPort}{path}{ctx.Request.QueryString}";
         using var upstream = new HttpRequestMessage(new HttpMethod(ctx.Request.Method), target);
         bool hasBody = ctx.Request.ContentLength > 0 || ctx.Request.Headers.TransferEncoding.Count > 0;
-        if (hasBody)
+        bool chat = HttpMethods.IsPost(ctx.Request.Method) && path is "/v1/chat/completions" or "/chat/completions" or "/v1/responses";
+        if (hasBody && chat && reasoning is not null)
+        {
+            using var requestBody = new MemoryStream();
+            await ctx.Request.Body.CopyToAsync(requestBody, ctx.RequestAborted);
+            upstream.Content = new ByteArrayContent(ApplyThinkingDefaults(requestBody.ToArray(), reasoning()));
+        }
+        else if (hasBody)
         {
             upstream.Content = new StreamContent(ctx.Request.Body);
             if (ctx.Request.ContentLength is long length) upstream.Content.Headers.ContentLength = length;
@@ -99,6 +108,21 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         }
         if (whole is not null && response.IsSuccessStatusCode) TryWrite(ModelsCachePath, whole.ToArray());
         if (response.IsSuccessStatusCode) RecordTimings(tail.Text());
+    }
+
+    // Thinking text is the slow part of Qwen3.8 output, so the tray sets the thinking effort (low/medium/xhigh) and
+    // drops earlier turns' thinking from the history (as Qwen's official template does). Values the client sets
+    // itself (chat_template_kwargs or a top-level reasoning_effort) are never overridden.
+    internal static byte[] ApplyThinkingDefaults(byte[] body, string effort)
+    {
+        JsonNode? root;
+        try { root = JsonNode.Parse(body); } catch (System.Text.Json.JsonException) { return body; }
+        if (root is not JsonObject request) return body;
+        var kwargs = request["chat_template_kwargs"] as JsonObject;
+        if (kwargs is null) { if (request.ContainsKey("chat_template_kwargs")) return body; request["chat_template_kwargs"] = kwargs = new JsonObject(); }
+        if (!kwargs.ContainsKey("reasoning_effort") && !request.ContainsKey("reasoning_effort")) kwargs["reasoning_effort"] = effort;
+        if (!kwargs.ContainsKey("preserve_thinking")) kwargs["preserve_thinking"] = false;
+        return Encoding.UTF8.GetBytes(request.ToJsonString());
     }
 
     // llama-server reports timings in the final JSON (or final SSE chunk); surface the last reply's speed in the UI.

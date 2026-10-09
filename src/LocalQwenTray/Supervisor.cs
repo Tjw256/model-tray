@@ -8,6 +8,8 @@ internal sealed class AppSettings
     public int? IdleMinutes { get; set; } = Policy.DefaultIdleMinutes;
     public int ContextTokens { get; set; } = Policy.Ctx128;
     public string Variant { get; set; } = Policy.DefaultVariant;
+    public string Reasoning { get; set; } = Policy.DefaultReasoning;
+    public string ReasoningOrDefault => Policy.ReasoningChoices.Contains(Reasoning) ? Reasoning : Policy.DefaultReasoning;
     public LaunchChoice Choice => new(Policy.Variants.Contains(Variant) ? Variant : Policy.DefaultVariant, Policy.ContextChoices.Contains(ContextTokens) ? ContextTokens : Policy.Ctx128);
     static string PathFor(string dir) => Path.Combine(dir, "settings.json");
     public static AppSettings Load(string dir)

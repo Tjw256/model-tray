@@ -77,7 +77,7 @@ internal static class Program
             async Task<string?> EnsureGateway()
             {
                 if (gateway is not null) return null;
-                var candidate = new Gateway(supervisor, key, Policy.PublicPort, Policy.BackendPort, stateDirectory, gatewayLog.Write);
+                var candidate = new Gateway(supervisor, key, Policy.PublicPort, Policy.BackendPort, stateDirectory, gatewayLog.Write, () => settings.ReasoningOrDefault);
                 try { await candidate.StartAsync(); gateway = candidate; gatewayLog.Write($"Listening on http://127.0.0.1:{Policy.PublicPort}/v1 (model loads on demand)"); return null; }
                 catch (Exception ex)
                 {

@@ -102,13 +102,18 @@ internal static class UiSmokeTests
                 if (host.LastContext != Policy.Ctx128 || !supervisor.IsReady) throw new Exception("256K should fall back to 128K when VRAM is short");
                 Console.WriteLine("PASS 256K falls back to 128K when free VRAM is short");
                 await supervisor.Unload(default); host.Free = 32000;
-                var idle = Item(context, UiSpec.MenuLabels[4]);
+                Item(context, "Reasoning").DropDownItems.OfType<ToolStripMenuItem>().Single(x => (string)x.Tag! == "xhigh").PerformClick();
+                if (settings.Reasoning != "xhigh" || AppSettings.Load(dir).Reasoning != "xhigh") throw new Exception("Reasoning choice not applied and saved");
+                if (host.UpCalls != 3 || supervisor.IsReady) throw new Exception("Changing reasoning must not load or reload the model");
+                Item(context, "Reasoning").DropDownItems.OfType<ToolStripMenuItem>().Single(x => (string)x.Tag! == "low").PerformClick();
+                Console.WriteLine("PASS reasoning choice applies without reloading and persists");
+                var idle = Item(context, UiSpec.MenuLabels[5]);
                 idle.DropDownItems.OfType<ToolStripMenuItem>().Single(x => x.Text == "After 15 min").PerformClick();
                 if (settings.IdleMinutes != 15 || supervisor.IdleTimeout != TimeSpan.FromMinutes(15) || AppSettings.Load(dir).IdleMinutes != 15) throw new Exception("Idle choice not applied and saved");
                 idle.DropDownItems.OfType<ToolStripMenuItem>().Single(x => x.Text == "Never").PerformClick();
                 if (supervisor.IdleTimeout is not null || AppSettings.Load(dir).IdleMinutes is not null) throw new Exception("Never not applied");
                 Console.WriteLine("PASS auto-unload choice applies immediately and persists");
-                Item(context, UiSpec.MenuLabels[5]).PerformClick();
+                Item(context, UiSpec.MenuLabels[6]).PerformClick();
                 if (!autostart) throw new Exception("Start with Windows toggle not applied");
                 Console.WriteLine("PASS Start with Windows toggle");
                 context.TogglePanel();
@@ -137,7 +142,7 @@ internal static class UiSmokeTests
             var loadedSupervisor = new Supervisor(new Controller(loadedHost));
             using var loadedContext = new TrayContext(loadedSupervisor, loadedHost, new SafeLog("test-secret-value", dir), new AppSettings(), dir, null, () => false, _ => { });
             using var exitTimer = new System.Windows.Forms.Timer { Interval = 200 };
-            exitTimer.Tick += (_, _) => { exitTimer.Stop(); Item(loadedContext, UiSpec.MenuLabels[10]).PerformClick(); };
+            exitTimer.Tick += (_, _) => { exitTimer.Stop(); Item(loadedContext, UiSpec.MenuLabels[11]).PerformClick(); };
             exitTimer.Start(); Application.Run(loadedContext);
             if (loadedHost.StopCalls != 1 || loadedHost.State.Running) { Console.WriteLine("FAIL quitting a loaded tray must unload the model"); result = 1; }
             else Console.WriteLine("PASS quitting the tray unloads a loaded model");
