@@ -4,6 +4,12 @@ internal sealed record LaunchChoice(string Variant, int Context, int Slots = Pol
 {
     public static readonly LaunchChoice Default = new(Policy.DefaultVariant, Policy.Ctx128);
 }
+// A load that does not fit in free VRAM. The tray then notifies once and waits (see Supervisor) instead of retrying per request.
+internal sealed class InsufficientVramException(int freeMiB, int needMiB, string message) : InvalidOperationException(message)
+{
+    public int FreeMiB => freeMiB;
+    public int NeedMiB => needMiB;
+}
 internal static class Policy
 {
     // One stable model name for clients, whichever quant is loaded (the tray shows the actual quant).
@@ -13,6 +19,10 @@ internal static class Policy
     public const int PublicPort = 8000, BackendPort = 18081;
     public const int DefaultIdleMinutes = 5;
     public static readonly int?[] IdleChoices = [1, 5, 15, 30, 60, null];
+    // After a load fails for lack of VRAM: one notification, then requests wait this long while free VRAM is polled
+    // (owner decision 2026-10-10: retries used to notify on every client request).
+    public const int DefaultVramWaitMinutes = 5, VramPollSeconds = 5;
+    public static readonly int[] VramWaitChoices = [1, 5, 15, 30];
     // 256K is the model's trained context (n_ctx_train 262144); going beyond needs YaRN and degrades recall.
     public const int Ctx64 = 65536, Ctx96 = 98304, Ctx128 = 131072, Ctx256 = 262144;
     public static readonly int[] ContextChoices = [Ctx128, Ctx256];
@@ -60,7 +70,7 @@ internal static class Policy
         foreach (var context in FallbackContexts.Where(c => c <= preferredContext))
             foreach (var slots in preferredSlots > 1 ? new[] { preferredSlots, 1 } : new[] { 1 })
                 if (budget >= Need(context, weightSavingMiB, slots)) return (context, slots);
-        throw new InvalidOperationException($"Insufficient free VRAM: {budget + HeadroomMiB} MiB free; need {Need(Ctx64, weightSavingMiB) + HeadroomMiB} MiB for the GPU-only runtime with a {Ctx64 / 1024}K context. CPU offload and MTP downgrade are disabled. Close GPU-heavy apps (games, video editors) or unload Ollama models yourself, then retry. Nothing was automatically closed.");
+        throw new InsufficientVramException(budget + HeadroomMiB, Need(Ctx64, weightSavingMiB) + HeadroomMiB, $"Insufficient free VRAM: {budget + HeadroomMiB} MiB free; need {Need(Ctx64, weightSavingMiB) + HeadroomMiB} MiB for the GPU-only runtime with a {Ctx64 / 1024}K context. CPU offload and MTP downgrade are disabled. Close GPU-heavy apps (games, video editors) or unload Ollama models yourself, then retry. Nothing was automatically closed.");
     }
     public static int ChooseContext(int budget, int preferred, int weightSavingMiB = 0) => ChooseLaunch(budget, preferred, 1, weightSavingMiB).Context;
     public static string ContextLabel(int tokens) => $"{tokens / 1024}K";

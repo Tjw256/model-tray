@@ -8,6 +8,7 @@ internal interface IQwenHost
     Task<IDisposable> AcquireLease(CancellationToken ct);
     Task<EngineState> Inspect(CancellationToken ct);
     Task<GpuMemory> FreeVram(CancellationToken ct);
+    Task<bool> Fits(CancellationToken ct);                // would the next load fit in free VRAM right now
     Task LaunchNative(GpuMemory memory, CancellationToken ct);
     Task Stop(CancellationToken ct);
     Task<ProbeResult> Probe(CancellationToken ct, bool verifyInference = true);
@@ -26,6 +27,8 @@ internal sealed class Controller(IQwenHost host)
     public string Status { get; private set; } = "Checking status";
     // True when the last Start launched a fresh engine (as opposed to adopting one that was already running).
     public bool LastStartLaunched { get; private set; }
+    // Set when the last Start failed only because the model does not fit in free VRAM.
+    public InsufficientVramException? LastShortage { get; private set; }
     public event Action<string>? Changed;
     static string Ready(ProbeResult probe) => string.IsNullOrEmpty(probe.Detail) ? "Ready" : $"Ready ({probe.Detail}; new client session may be needed)";
     void Set(string value) { if (Status == value) return; Status = value; Changed?.Invoke(value); }
@@ -52,6 +55,7 @@ internal sealed class Controller(IQwenHost host)
         var token = deadline.Token;
         bool started = false;
         LastStartLaunched = false;
+        LastShortage = null;
         IDisposable? lease = null;
         try
         {
@@ -87,6 +91,7 @@ internal sealed class Controller(IQwenHost host)
         }
         catch (Exception ex)
         {
+            LastShortage = ex as InsufficientVramException;
             string error = ex is OperationCanceledException ? (ct.IsCancellationRequested ? "Start cancelled" : "Error: native startup timed out after 3 minutes") : "Error: " + ex.Message;
             if (started)
             {

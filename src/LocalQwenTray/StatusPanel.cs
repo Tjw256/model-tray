@@ -22,7 +22,7 @@ internal sealed class StatusPanel : Form
     readonly Label stateTitle = new(), stateDetail = new(), lastReply = new();
     readonly Panel dot = new();
     readonly Button primary = new(), logs = new(), copy = new();
-    readonly ComboBox idle = new(), contextBox = new(), modelBox = new(), reasoningBox = new(), slotsBox = new();
+    readonly ComboBox idle = new(), contextBox = new(), modelBox = new(), reasoningBox = new(), slotsBox = new(), vramWait = new();
     readonly Label modelHint = new(), openCode = new();
     readonly Button openCodeButton = new();
     readonly CheckBox autostart = new();
@@ -96,6 +96,10 @@ internal sealed class StatusPanel : Form
         foreach (var m in Policy.IdleChoices) idle.Items.Add(IdleText(m));
         idle.SelectedIndexChanged += (_, _) => { if (!updating) actions.SetIdle(Policy.IdleChoices[idle.SelectedIndex]); };
         Row("Unload when idle", idle);
+        Combo(vramWait);
+        foreach (var m in Policy.VramWaitChoices) vramWait.Items.Add(UiSpec.VramWaitText(m));
+        vramWait.SelectedIndexChanged += (_, _) => { if (!updating) actions.SetVramWait(Policy.VramWaitChoices[vramWait.SelectedIndex]); };
+        Row("Wait for VRAM", vramWait);
         root.Controls.Add(grid);
 
         autostart.Text = "Start with Windows"; autostart.AutoSize = true; autostart.ForeColor = p.Text; autostart.Margin = new Padding(0, 0, 0, D(14));
@@ -151,6 +155,7 @@ internal sealed class StatusPanel : Form
             var r = actions.LastReply;
             lastReply.Text = r is null ? "—" : $"{r.TokensPerSecond:F0} tok/s · {r.Tokens} tokens · {Ago(DateTimeOffset.Now - r.At)}";
             idle.SelectedIndex = Array.IndexOf(Policy.IdleChoices, actions.IdleMinutes) is var i and >= 0 ? i : 1;
+            vramWait.SelectedIndex = Math.Max(0, Array.IndexOf(Policy.VramWaitChoices, actions.VramWaitMinutes));
             autostart.Checked = actions.Autostart;
             var oc = actions.OpenCodeStatus;
             openCode.Text = oc; openCode.ForeColor = oc == "Connected" ? TrayIcons.StateColor(TrayState.Ready) : p.Muted;
@@ -173,7 +178,7 @@ internal sealed class StatusPanel : Form
     (string, string) Describe(TrayState s) => s switch
     {
         TrayState.Sleeping => ("Sleeping", "Loads automatically on the next request"),
-        TrayState.Loading => ("Loading model…", "Requests wait and continue when it's ready"),
+        TrayState.Loading => actions.WaitingForVram is { } w ? ("Waiting for free VRAM", w) : ("Loading model…", "Requests wait and continue when it's ready"),
         TrayState.Busy => ("Generating", Loaded() + (actions.InFlight == 1 ? " · 1 request" : $" · {actions.InFlight} requests")),
         TrayState.Ready => ("Ready", Loaded() + (actions.UnloadsIn is TimeSpan t ? $" · unloads in {Span(t)} if idle" : " · stays loaded")),
         _ => ("Needs attention", actions.ErrorText),

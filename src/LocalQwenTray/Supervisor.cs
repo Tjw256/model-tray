@@ -10,6 +10,8 @@ internal sealed class AppSettings
     public string Variant { get; set; } = Policy.DefaultVariant;
     public string Reasoning { get; set; } = Policy.DefaultReasoning;
     public int ParallelRequests { get; set; } = Policy.DefaultSlots;
+    public int VramWaitMinutes { get; set; } = Policy.DefaultVramWaitMinutes;
+    [System.Text.Json.Serialization.JsonIgnore] public int VramWaitOrDefault => Policy.VramWaitChoices.Contains(VramWaitMinutes) ? VramWaitMinutes : Policy.DefaultVramWaitMinutes;
     [System.Text.Json.Serialization.JsonIgnore] public string ReasoningOrDefault => Policy.ReasoningChoices.Contains(Reasoning) ? Reasoning : Policy.DefaultReasoning;
     [System.Text.Json.Serialization.JsonIgnore] public LaunchChoice Choice => new(Policy.Variants.Contains(Variant) ? Variant : Policy.DefaultVariant, Policy.ContextChoices.Contains(ContextTokens) ? ContextTokens : Policy.Ctx128, Policy.SlotChoices.Contains(ParallelRequests) ? ParallelRequests : Policy.DefaultSlots);
     static string PathFor(string dir) => Path.Combine(dir, "settings.json");
@@ -26,11 +28,15 @@ internal sealed class AppSettings
 }
 // On-demand lifecycle: the first request loads the model (one shared load for concurrent callers),
 // in-flight requests are counted, and the model is unloaded after IdleTimeout with nothing in flight.
-internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? clock = null, IQwenHost? sessions = null)
+// When a load does not fit in free VRAM: one VramShort notice, then the load (and every request joining it) waits up to
+// VramWait while free VRAM is polled, and loads as soon as it fits. If it never fits, later requests fail at once,
+// without a notice or a load attempt, until VRAM fits again or the user clicks Load now.
+internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? clock = null, IQwenHost? host = null, Func<TimeSpan, CancellationToken, Task>? delay = null)
 {
     readonly object sync = new();
     readonly Func<DateTimeOffset> now = clock ?? (() => DateTimeOffset.Now);
     readonly CancellationTokenSource lifetime = new();
+    readonly Func<TimeSpan, CancellationToken, Task> pause = delay ?? Task.Delay;
     Task? load;
     int inFlight;
     public Controller Controller => controller;
@@ -39,11 +45,16 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
     public ReplyStats? LastReply { get; private set; }
     public int InFlight { get { lock (sync) return inFlight; } }
     public event Action? Changed;
+    public event Action<InsufficientVramException, TimeSpan>? VramShort;   // once per shortage, with how long requests will wait
+    public TimeSpan VramWait { get; set; } = TimeSpan.FromMinutes(Policy.DefaultVramWaitMinutes);
+    public DateTimeOffset? VramWaitUntil { get; private set; }            // set while requests wait for VRAM
+    public bool VramGaveUp { get; private set; }                         // the last wait ran out: refuse quietly
     public bool IsReady => controller.Status.StartsWith("Ready");
     public TrayState State
     {
         get
         {
+            if (VramWaitUntil is not null) return TrayState.Loading;
             var s = controller.Status;
             if (s.StartsWith("Error:")) return TrayState.Error;
             if (s.StartsWith("Ready")) return InFlight > 0 ? TrayState.Busy : TrayState.Ready;
@@ -79,33 +90,56 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
     }
     public void RecordReply(int tokens, double tokensPerSecond) { LastReply = new(tokens, tokensPerSecond, now()); Changed?.Invoke(); }
     // Loads the model if needed. Concurrent callers share one load; the caller's cancellation only stops its own wait.
-    public async Task EnsureReady(CancellationToken ct)
+    public async Task EnsureReady(CancellationToken ct, bool manual = false)
     {
         if (IsReady) return;
         Task current;
         lock (sync)
         {
             lifetime.Token.ThrowIfCancellationRequested();
-            current = load is { IsCompleted: false } ? load : load = LoadAndRestore(lifetime.Token);
+            current = load is { IsCompleted: false } ? load : load = LoadAndRestore(manual, lifetime.Token);
         }
         await current.WaitAsync(ct);
         if (!IsReady) throw new InvalidOperationException(controller.Status.StartsWith("Error: ") ? controller.Status["Error: ".Length..] : controller.Status);
         lock (sync) LastActivity = now();
     }
     // Restores the conversation saved at the last unload, but only into an engine this load actually started.
-    async Task LoadAndRestore(CancellationToken ct)
+    async Task LoadAndRestore(bool manual, CancellationToken ct)
     {
+        if (VramGaveUp && !manual && host is not null && !await host.Fits(ct))
+            throw new InvalidOperationException("Not enough free VRAM for Local Qwen (still short after waiting). Free VRAM, then retry or click Load now.");
+        VramGaveUp = false;
         await controller.Start(ct);
-        if (sessions is not null && IsReady && controller.LastStartLaunched)
+        if (!IsReady && controller.LastShortage is { } shortage) await WaitForVram(shortage, ct);
+        if (host is not null && IsReady && controller.LastStartLaunched)
         {
-            try { await sessions.RestoreSession(ct); } catch (Exception) when (!ct.IsCancellationRequested) { /* a lost cache only costs a re-read */ }
+            try { await host.RestoreSession(ct); } catch (Exception) when (!ct.IsCancellationRequested) { /* a lost cache only costs a re-read */ }
         }
+    }
+    async Task WaitForVram(InsufficientVramException shortage, CancellationToken ct)
+    {
+        VramWaitUntil = now() + VramWait;
+        Changed?.Invoke();
+        VramShort?.Invoke(shortage, VramWait);
+        try
+        {
+            while (host is not null && now() < VramWaitUntil)
+            {
+                await pause(TimeSpan.FromSeconds(Policy.VramPollSeconds), ct);
+                if (!await host.Fits(ct)) continue;
+                await controller.Start(ct);
+                if (IsReady || controller.LastShortage is null) break;   // loaded, or failed for another reason (shown as usual)
+            }
+        }
+        finally { VramWaitUntil = null; }
+        VramGaveUp = !IsReady && controller.LastShortage is not null;
+        Changed?.Invoke();
     }
     async Task SaveThenStop(CancellationToken ct)
     {
-        if (sessions is not null && IsReady)
+        if (host is not null && IsReady)
         {
-            try { await sessions.SaveSession(ct); } catch (Exception) when (!ct.IsCancellationRequested) { }
+            try { await host.SaveSession(ct); } catch (Exception) when (!ct.IsCancellationRequested) { }
         }
         await controller.Stop(ct);
     }
@@ -131,5 +165,5 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
         if (pending is not null) { try { await pending.WaitAsync(ct); } catch (Exception) when (!ct.IsCancellationRequested) { } }
         await SaveThenStop(ct);
     }
-    public async Task LoadNow(CancellationToken ct) { await EnsureReady(ct); lock (sync) LastActivity = now(); }
+    public async Task LoadNow(CancellationToken ct) { await EnsureReady(ct, manual: true); lock (sync) LastActivity = now(); }
 }

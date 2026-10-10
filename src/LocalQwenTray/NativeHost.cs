@@ -98,6 +98,14 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
         try {await client.ConnectAsync("127.0.0.1",Policy.BackendPort,ct);return true;}
         catch(SocketException){return false;}
     }
+    // VRAM needs are measured on the reference quant; others differ by roughly their weights-file size.
+    static int WeightSaving(long modelBytes)=>Policy.ReferenceWeightsMiB-(int)(modelBytes/(1024*1024));
+    public async Task<bool> Fits(CancellationToken ct)
+    {
+        if(OllamaModels.Find(Choice.Variant) is not { } files) return true;   // let the load itself report the missing model
+        try { Policy.ChooseLaunch(Policy.Budget(await FreeVram(ct)),Choice.Context,Choice.Slots,WeightSaving(files.ModelBytes)); return true; }
+        catch(InsufficientVramException) { return false; }
+    }
     public async Task LaunchNative(GpuMemory memory,CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
@@ -106,8 +114,7 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
         var choice=Choice;
         var files=OllamaModels.Find(choice.Variant)
             ?? throw new FileNotFoundException($"Model {choice.Variant} is not downloaded in Ollama; run: ollama pull {OllamaModels.Repository}:{choice.Variant}");
-        // VRAM needs are measured on the reference quant; others differ by roughly their weights-file size.
-        int saving=Policy.ReferenceWeightsMiB-(int)(files.ModelBytes/(1024*1024));
+        int saving=WeightSaving(files.ModelBytes);
         int budget=Policy.Budget(memory);
         var (context,slots)=Policy.ChooseLaunch(budget,choice.Context,choice.Slots,saving);
         if(!File.Exists(Executable)) throw new FileNotFoundException($"llama-server.exe not found at {Executable}; set LlamaServer in {AppConfig.PathIn(StateDirectory)}");

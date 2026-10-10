@@ -118,7 +118,7 @@ internal static class UiSmokeTests
                 idle.DropDownItems.OfType<ToolStripMenuItem>().Single(x => x.Text == "Never").PerformClick();
                 if (supervisor.IdleTimeout is not null || AppSettings.Load(dir).IdleMinutes is not null) throw new Exception("Never not applied");
                 Console.WriteLine("PASS auto-unload choice applies immediately and persists");
-                Item(context, UiSpec.MenuLabels[7]).PerformClick();
+                Item(context, UiSpec.MenuLabels[8]).PerformClick();
                 if (!autostart) throw new Exception("Start with Windows toggle not applied");
                 Console.WriteLine("PASS Start with Windows toggle");
                 context.RefreshView();
@@ -153,7 +153,7 @@ internal static class UiSmokeTests
             var loadedSupervisor = new Supervisor(new Controller(loadedHost));
             using var loadedContext = new TrayContext(loadedSupervisor, loadedHost, new SafeLog("test-secret-value", dir), new AppSettings(), dir, null, () => false, _ => { });
             using var exitTimer = new System.Windows.Forms.Timer { Interval = 200 };
-            exitTimer.Tick += (_, _) => { exitTimer.Stop(); Item(loadedContext, UiSpec.MenuLabels[13]).PerformClick(); };
+            exitTimer.Tick += (_, _) => { exitTimer.Stop(); Item(loadedContext, UiSpec.MenuLabels[14]).PerformClick(); };
             exitTimer.Start(); Application.Run(loadedContext);
             if (loadedHost.StopCalls != 1 || loadedHost.State.Running) { Console.WriteLine("FAIL quitting a loaded tray must unload the model"); result = 1; }
             else Console.WriteLine("PASS quitting the tray unloads a loaded model");

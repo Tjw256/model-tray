@@ -11,8 +11,9 @@ internal sealed class SingleInstance : IDisposable
 internal static class UiSpec
 {
     // Menu as shown while the model is asleep (the load item reads "Unload now" while loaded).
-    public static readonly string[] MenuLabels = ["Local Qwen", "Load now", "Context", "Model", "Reasoning", "Parallel requests", "Unload when idle", "Start with Windows", "Copy API endpoint", "Copy API key", "Connect OpenCode (T3 Code)", "Open log", "Open config folder", "Quit Local Qwen"];
+    public static readonly string[] MenuLabels = ["Local Qwen", "Load now", "Context", "Model", "Reasoning", "Parallel requests", "Unload when idle", "Wait for free VRAM", "Start with Windows", "Copy API endpoint", "Copy API key", "Connect OpenCode (T3 Code)", "Open log", "Open config folder", "Quit Local Qwen"];
     public static string SlotText(int slots) => slots > 1 ? "2 — answer while busy (+0.8 GB VRAM)" : "1 — one request at a time";
+    public static string VramWaitText(int minutes) => minutes == 1 ? "1 minute" : $"{minutes} minutes";
     public static string ReasoningText(string effort) => effort switch { "low" => "Low — fastest", "medium" => "Medium", _ => "High (xhigh) — most thorough" };
     public static bool StartsModelOnLaunch => false;   // the tray only listens; the first request loads the model
     public static bool StopsModelOnExit => true;       // without the gateway the model is unreachable, so quitting unloads it
@@ -37,6 +38,9 @@ internal interface TrayActions
     ReplyStats? LastReply { get; }
     string ErrorText { get; }
     int? IdleMinutes { get; }
+    int VramWaitMinutes { get; }                        // how long requests wait for free VRAM after a shortage
+    string? WaitingForVram { get; }                     // detail while waiting, else null
+    void SetVramWait(int minutes);
     bool Autostart { get; }
     LaunchChoice Choice { get; }                        // used by the next load
     EngineShape? Loaded { get; }                        // what is running now
@@ -75,7 +79,7 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
     readonly System.Windows.Forms.Timer timer = new() { Interval = 15000 };
     readonly CancellationTokenSource lifetime = new();
     readonly SynchronizationContext ui;
-    readonly ToolStripMenuItem header, loadUnload, contextMenu, modelMenu, reasoningMenu, slotsMenu, idleMenu, autostartItem;
+    readonly ToolStripMenuItem header, loadUnload, contextMenu, modelMenu, reasoningMenu, slotsMenu, idleMenu, vramWaitMenu, autostartItem;
     StatusPanel? panel;
     TrayState? shownState;
     string? gatewayError, lastBalloon;
@@ -124,14 +128,21 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
             item.Click += (_, _) => SetIdle((int?)item.Tag);
             idleMenu.DropDownItems.Add(item);
         }
-        autostartItem = new(UiSpec.MenuLabels[7]);
-        var copy = new ToolStripMenuItem(UiSpec.MenuLabels[8]);
-        var copyKey = new ToolStripMenuItem(UiSpec.MenuLabels[9]) { Enabled = apiKey is not null };
-        openCodeItem = new ToolStripMenuItem(UiSpec.MenuLabels[10]);
-        var openLog = new ToolStripMenuItem(UiSpec.MenuLabels[11]);
-        var openConfig = new ToolStripMenuItem(UiSpec.MenuLabels[12]);
-        var quit = new ToolStripMenuItem(UiSpec.MenuLabels[13]);
-        menu.Items.AddRange([header, new ToolStripSeparator(), loadUnload, contextMenu, modelMenu, reasoningMenu, slotsMenu, idleMenu, autostartItem, new ToolStripSeparator(), copy, copyKey, openCodeItem, openLog, openConfig, new ToolStripSeparator(), quit]);
+        vramWaitMenu = new(UiSpec.MenuLabels[7]);
+        foreach (var m in Policy.VramWaitChoices)
+        {
+            var item = new ToolStripMenuItem(UiSpec.VramWaitText(m)) { Tag = m };
+            item.Click += (_, _) => SetVramWait((int)item.Tag!);
+            vramWaitMenu.DropDownItems.Add(item);
+        }
+        autostartItem = new(UiSpec.MenuLabels[8]);
+        var copy = new ToolStripMenuItem(UiSpec.MenuLabels[9]);
+        var copyKey = new ToolStripMenuItem(UiSpec.MenuLabels[10]) { Enabled = apiKey is not null };
+        openCodeItem = new ToolStripMenuItem(UiSpec.MenuLabels[11]);
+        var openLog = new ToolStripMenuItem(UiSpec.MenuLabels[12]);
+        var openConfig = new ToolStripMenuItem(UiSpec.MenuLabels[13]);
+        var quit = new ToolStripMenuItem(UiSpec.MenuLabels[14]);
+        menu.Items.AddRange([header, new ToolStripSeparator(), loadUnload, contextMenu, modelMenu, reasoningMenu, slotsMenu, idleMenu, vramWaitMenu, autostartItem, new ToolStripSeparator(), copy, copyKey, openCodeItem, openLog, openConfig, new ToolStripSeparator(), quit]);
         copyKey.Click += (_, _) => { if (apiKey is not null) Clipboard.SetText(apiKey); };
         openCodeItem.Click += (_, _) => ConnectOpenCode();
         openConfig.Click += (_, _) => { Directory.CreateDirectory(stateDirectory); Process.Start(new ProcessStartInfo("explorer.exe", "\"" + stateDirectory + "\"") { UseShellExecute = false })?.Dispose(); };
@@ -147,6 +158,8 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
         icon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) TogglePanel(); };
         supervisor.Controller.Changed += OnStatusChanged;
         supervisor.Changed += OnChanged;
+        supervisor.VramWait = TimeSpan.FromMinutes(settings.VramWaitOrDefault);
+        supervisor.VramShort += OnVramShort;
         timer.Tick += async (_, _) => await Tick();
         timer.Start();
         _ = Tick();   // observe only: adopt an already-loaded model, never load one here
@@ -158,8 +171,21 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
     public int InFlight => supervisor.InFlight;
     public TimeSpan? UnloadsIn => supervisor.UnloadsIn;
     public ReplyStats? LastReply => supervisor.LastReply;
-    public string ErrorText => gatewayError ?? log.Redact(supervisor.Controller.Status.StartsWith("Error: ") ? supervisor.Controller.Status[7..] : supervisor.Controller.Status);
+    public string ErrorText => gatewayError ?? (supervisor.VramGaveUp && supervisor.Controller.LastShortage is { } s
+        ? $"Not enough free VRAM: {s.FreeMiB:N0} MiB free, {s.NeedMiB:N0} MiB needed. Waited {UiSpec.VramWaitText(settings.VramWaitOrDefault)}; requests are refused until it fits. Close GPU-heavy apps, then click Load now."
+        : null) ?? log.Redact(supervisor.Controller.Status.StartsWith("Error: ") ? supervisor.Controller.Status[7..] : supervisor.Controller.Status);
     public int? IdleMinutes => settings.IdleMinutes;
+    public int VramWaitMinutes => settings.VramWaitOrDefault;
+    public string? WaitingForVram => supervisor.VramWaitUntil is { } until && supervisor.Controller.LastShortage is { } s
+        ? $"Loads automatically once {s.NeedMiB:N0} MiB are free ({s.FreeMiB:N0} now) · gives up in {Math.Max(0, (int)Math.Ceiling((until - DateTimeOffset.Now).TotalMinutes))} min"
+        : null;
+    public void SetVramWait(int minutes)
+    {
+        settings.VramWaitMinutes = minutes;
+        supervisor.VramWait = TimeSpan.FromMinutes(minutes);
+        try { settings.Save(stateDirectory); } catch (Exception ex) { log.Write("Saving settings failed: " + ex.Message); }
+        RefreshView();
+    }
     public bool Autostart => getAutostart();
     public LaunchChoice Choice => settings.Choice;
     public EngineShape? Loaded => supervisor.IsReady ? host.Loaded() : null;
@@ -229,6 +255,13 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
 
     // ---- view ----
     void OnStatusChanged(string text) { log.Write(log.Redact(text)); OnChanged(); }
+    // The only notification for a VRAM shortage; the retries while waiting stay silent.
+    void OnVramShort(InsufficientVramException s, TimeSpan wait)
+    {
+        string text = $"Not enough free VRAM: {s.FreeMiB:N0} MiB free, {s.NeedMiB:N0} MiB needed. Close GPU-heavy apps; Local Qwen loads automatically if it fits within {UiSpec.VramWaitText((int)wait.TotalMinutes)}.";
+        log.Write($"VRAM short, waiting {wait.TotalMinutes} min: {s.FreeMiB} MiB free, {s.NeedMiB} MiB needed");
+        if (!exiting) ui.Post(_ => { if (!exiting) icon.ShowBalloonTip(8000, "Local Qwen", text, ToolTipIcon.Warning); }, null);
+    }
     void OnChanged() { if (!exiting) ui.Post(_ => RefreshView(), null); }
     Icon IconFor(TrayState s)
     {
@@ -249,9 +282,10 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
         string tip = "Local Qwen — " + word + (s == TrayState.Sleeping ? " (loads on request)" : "");
         icon.Text = tip.Length > 63 ? tip[..63] : tip;
         if (Quitting is null) header.Text = "Local Qwen — " + word;
-        loadUnload.Text = supervisor.IsReady ? "Unload now" : s == TrayState.Loading ? "Loading…" : UiSpec.MenuLabels[1];
+        loadUnload.Text = supervisor.IsReady ? "Unload now" : supervisor.VramWaitUntil is not null ? "Waiting for free VRAM…" : s == TrayState.Loading ? "Loading…" : UiSpec.MenuLabels[1];
         loadUnload.Enabled = s != TrayState.Loading;
         foreach (ToolStripMenuItem item in idleMenu.DropDownItems) item.Checked = (int?)item.Tag == settings.IdleMinutes;
+        foreach (ToolStripMenuItem item in vramWaitMenu.DropDownItems) item.Checked = (int)item.Tag! == settings.VramWaitOrDefault;
         foreach (ToolStripMenuItem item in contextMenu.DropDownItems) item.Checked = (int)item.Tag! == settings.Choice.Context;
         foreach (ToolStripMenuItem item in slotsMenu.DropDownItems) item.Checked = (int)item.Tag! == settings.Choice.Slots;
         foreach (ToolStripMenuItem item in reasoningMenu.DropDownItems) item.Checked = (string)item.Tag! == settings.ReasoningOrDefault;
@@ -266,10 +300,11 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
         }
         autostartItem.Checked = getAutostart();
         var oc = OpenCodeStatus;
-        openCodeItem.Text = oc == "Connected" ? "OpenCode (T3 Code): connected — refresh" : UiSpec.MenuLabels[10];
+        openCodeItem.Text = oc == "Connected" ? "OpenCode (T3 Code): connected — refresh" : UiSpec.MenuLabels[11];
         openCodeItem.Checked = oc == "Connected";
         openCodeItem.Enabled = oc != "Not installed";
-        if (s == TrayState.Error && ErrorText != lastBalloon)
+        // VRAM shortages notify once through OnVramShort, not on every failed retry.
+        if (s == TrayState.Error && ErrorText != lastBalloon && supervisor.Controller.LastShortage is null)
         {
             lastBalloon = ErrorText;
             icon.ShowBalloonTip(8000, "Local Qwen", ErrorText[..Math.Min(240, ErrorText.Length)], ToolTipIcon.Warning);

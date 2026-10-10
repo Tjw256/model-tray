@@ -50,13 +50,13 @@ Ollama and plain llama.cpp ran at about the same speed. The gain comes from sett
 - **Two requests at once.** Two slots share one KV pool (`-np 2 --kv-unified`; each can still use the whole context), so a short request no longer waits behind a long one. While a cached 48K-token background conversation was generating, a short email request finished in **1.2 s instead of 12.7 s**, and the background job ran 7% slower. The second slot costs about 0.8 GB of VRAM. Choice: Parallel requests 2 / 1.
 - **Graceful VRAM fallback.** If the chosen setup doesn't fit, for example while a video editor holds a few GB, the tray first drops to one slot and then to a smaller context (256K → 128K → 96K → 64K) instead of refusing. It never spills into system RAM; the panel shows what was loaded and why.
 - **Context 128K or 256K.** 256K is the model's trained maximum. If there isn't enough free VRAM for 256K when the model loads, it falls back to 128K and the panel tells you why. It never spills into system RAM.
-- **Checks before and after loading.** Free VRAM is checked first, and a load that doesn't fit is refused with a clear message (HTTP 503). After loading, the log is checked to confirm that all layers, the KV cache and the MTP draft are on the GPU.
+- **Checks before and after loading.** Free VRAM is checked first. If even 64K doesn't fit, you get **one** notification, and requests wait while the tray checks free VRAM every 5 s; the model loads as soon as it fits. If VRAM is still short when the wait ends (default 5 min, setting *Wait for free VRAM*: 1/5/15/30 min), requests are refused at once with HTTP 503, silently and without load attempts, until VRAM fits again or you click Load now. After loading, the log is checked to confirm that all layers, the KV cache and the MTP draft are on the GPU.
 - **Safe process ownership.** It only ever stops the `llama-server` it started, tracked by PID, start time and executable. Unknown programs on its ports are never killed.
 
 ### The tray
 
 - **Icon dot:** grey = sleeping, amber = loading, green = ready, blue = generating, red = needs attention.
-- **Left-click** opens the status panel (shown above). **Right-click** gives the same actions as a menu: Load/Unload now, Context, Model, Reasoning, Parallel requests, Unload when idle, Start with Windows, Copy API endpoint, Copy API key, Connect OpenCode (T3 Code), Open log, Open config folder, Quit.
+- **Left-click** opens the status panel (shown above). **Right-click** gives the same actions as a menu: Load/Unload now, Context, Model, Reasoning, Parallel requests, Unload when idle, Wait for free VRAM, Start with Windows, Copy API endpoint, Copy API key, Connect OpenCode (T3 Code), Open log, Open config folder, Quit.
 - Quitting the tray also unloads the model, since clients can't reach it without the tray.
 
 ## Requirements

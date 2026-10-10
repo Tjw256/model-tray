@@ -63,17 +63,54 @@ internal static class SelfTests
     {
         var host = new TestHost();
         var controller = new Controller(host);
-        var supervisor = new Supervisor(controller, sessions: host);
+        var supervisor = new Supervisor(controller, host: host);
         await supervisor.EnsureReady(default);
         Check("a load the tray started restores the saved conversation", host.SessionEvents.SequenceEqual(new[] { "restore-while-running" }));
         supervisor.IdleTimeout = TimeSpan.FromMilliseconds(1); await Task.Delay(20); await supervisor.IdleTick(default);
         Check("idle unload saves the conversation before stopping the engine", host.SessionEvents.Last() == "save-while-running" && !host.State.Running);
         var adopted = new TestHost { State = new(true, true, 0), Health = new(true) };
-        var adoptedSupervisor = new Supervisor(new Controller(adopted), sessions: adopted);
+        var adoptedSupervisor = new Supervisor(new Controller(adopted), host: adopted);
         await adoptedSupervisor.EnsureReady(default);
         Check("an adopted, already-running engine is never overwritten by a saved session", adopted.RestoreCalls == 0 && adoptedSupervisor.IsReady);
         await adoptedSupervisor.Shutdown(default);
         Check("quitting saves the conversation before unloading", adopted.SessionEvents.SequenceEqual(new[] { "save-while-running" }) && !adopted.State.Running);
+    }
+    // Not enough VRAM: one notice, requests wait while VRAM is polled, then a quiet refusal. Fake clock and delay, no GPU.
+    static async Task VramShortage()
+    {
+        var clock = DateTimeOffset.Parse("2026-10-10T23:08:00Z");
+        var host = new TestHost { Free = 20000 };
+        int pauses = 0, freeAfter = 3, notices = 0;
+        var supervisor = new Supervisor(new Controller(host), () => clock, host, (span, _) =>
+        {
+            clock += span; pauses++;
+            if (pauses == freeAfter) host.Free = 32000;
+            return Task.CompletedTask;
+        }) { VramWait = TimeSpan.FromMinutes(5) };
+        InsufficientVramException? shortage = null;
+        supervisor.VramShort += (s, _) => { notices++; shortage = s; };
+        await Task.WhenAll(supervisor.EnsureReady(default), supervisor.EnsureReady(default));
+        Check("a VRAM shortage notifies once and loads as soon as VRAM frees, for every waiting request",
+            notices == 1 && supervisor.IsReady && host.UpCalls == 1 && pauses == 3 && supervisor.VramWaitUntil is null && !supervisor.VramGaveUp);
+        Check("the notice carries free and needed VRAM", shortage is { FreeMiB: 20000 } && shortage.NeedMiB == Policy.Need(Policy.Ctx64, 0) + Policy.HeadroomMiB);
+        Check("while waiting, a retry happens only once VRAM fits (no failed loads to spam)", host.FreeCalls == 2);
+
+        host = new TestHost { Free = 20000 }; pauses = 0; freeAfter = int.MaxValue; notices = 0;
+        supervisor = new Supervisor(new Controller(host), () => clock, host, (span, _) => { clock += span; pauses++; return Task.CompletedTask; }) { VramWait = TimeSpan.FromMinutes(5) };
+        supervisor.VramShort += (_, _) => notices++;
+        static async Task<string?> Fails(Func<Task> load) { try { await load(); return null; } catch (InvalidOperationException ex) { return ex.Message; } }
+        var first = await Fails(() => supervisor.EnsureReady(default));
+        Check("when VRAM never frees, the wait gives up after the set time", first is not null && supervisor.VramGaveUp && pauses == 5 * 60 / Policy.VramPollSeconds && notices == 1);
+        int freeCalls = host.FreeCalls; var status = supervisor.Controller.Status;
+        var quiet = await Fails(() => supervisor.EnsureReady(default));
+        Check("after giving up, requests fail at once: no notice, no load attempt", quiet?.Contains("still short") == true && notices == 1 && host.FreeCalls == freeCalls && supervisor.Controller.Status == status);
+        await Fails(() => supervisor.LoadNow(default));
+        Check("Load now retries and waits again with one new notice", notices == 2 && supervisor.VramGaveUp);
+        host.Free = 32000;
+        await supervisor.EnsureReady(default);
+        Check("once VRAM fits again, the next request loads normally", supervisor.IsReady && !supervisor.VramGaveUp && notices == 2);
+        Check("VRAM wait setting defaults to 5 minutes and falls back safely",
+            new AppSettings().VramWaitOrDefault == 5 && new AppSettings { VramWaitMinutes = 7 }.VramWaitOrDefault == 5 && Policy.VramWaitChoices.Contains(15));
     }
     public static int Run()
     {
@@ -86,12 +123,13 @@ internal static class SelfTests
             Check("Ready requires identity and inference", Policy.Classify(true,true,false,0) == "Ready");
             Lifecycle().GetAwaiter().GetResult();
             SessionLifecycle().GetAwaiter().GetResult();
+            VramShortage().GetAwaiter().GetResult();
             BoundaryTests.Run().GetAwaiter().GetResult();
             GatewayTests.Run().GetAwaiter().GetResult();
             McpTests.Run().GetAwaiter().GetResult();
             Check("tray launch only listens; it does not load the model", !UiSpec.StartsModelOnLaunch);
             Check("quitting the tray unloads the model it serves", UiSpec.StopsModelOnExit);
-            Check("tray menu", UiSpec.MenuLabels.SequenceEqual(new[] {"Local Qwen","Load now","Context","Model","Reasoning","Parallel requests","Unload when idle","Start with Windows","Copy API endpoint","Copy API key","Connect OpenCode (T3 Code)","Open log","Open config folder","Quit Local Qwen"}));
+            Check("tray menu", UiSpec.MenuLabels.SequenceEqual(new[] {"Local Qwen","Load now","Context","Model","Reasoning","Parallel requests","Unload when idle","Wait for free VRAM","Start with Windows","Copy API endpoint","Copy API key","Connect OpenCode (T3 Code)","Open log","Open config folder","Quit Local Qwen"}));
             Check("default choice is Q5_K_M at 128K and settings fall back safely", LaunchChoice.Default == new LaunchChoice("q5_K_M", 131072, 2) && new AppSettings { ContextTokens = 999, Variant = "bogus", ParallelRequests = 7 }.Choice == LaunchChoice.Default);
             Check("gateway owns the public port; engine is private", Policy.PublicPort == 8000 && Policy.BackendPort != Policy.PublicPort);
             Check("default auto-unload is 5 minutes and Never is offered", Policy.DefaultIdleMinutes == 5 && Policy.IdleChoices.Contains(null) && new AppSettings().IdleMinutes == 5);
