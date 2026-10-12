@@ -68,11 +68,14 @@ internal static class BoundaryTests
         SelfTests.Check("a video editor holding ~4 GB (25.7 GB free) still gets 96K instead of a refusal", Policy.ChooseLaunch(Policy.Budget(new(25716, 32607)), Policy.Ctx256, 2) == (Policy.Ctx96, 1));
         try {Policy.ChooseLaunch(N(Policy.Ctx64)-1,Policy.Ctx256,2);SelfTests.Check("below the 64K floor refuses before loading (never spills to RAM)",false);} catch(InvalidOperationException ex){SelfTests.Check("below the 64K floor refuses before loading (never spills to RAM)",ex.Message.Contains("VRAM") && ex.Message.Contains("Ollama"));}
         SelfTests.Check("256K loads when it fits", Policy.ChooseLaunch(N(Policy.Ctx256, 2), Policy.Ctx256, 2) == (Policy.Ctx256, 2));
-        SelfTests.Check("256K falls back to 128K when VRAM is short", Policy.ChooseLaunch(N(Policy.Ctx256) - 1, Policy.Ctx256, 1) == (Policy.Ctx128, 1));
+        SelfTests.Check("256K falls back to 192K, then 128K, when VRAM is short", Policy.ChooseLaunch(N(Policy.Ctx256) - 1, Policy.Ctx256, 1) == (Policy.Ctx192, 1) && Policy.ChooseLaunch(N(Policy.Ctx192) - 1, Policy.Ctx256, 1) == (Policy.Ctx128, 1));
+        SelfTests.Check("context outranks the second slot: 256K x1 before 192K x2", Policy.ChooseLaunch(N(Policy.Ctx256, 2) - 1, Policy.Ctx256, 2) == (Policy.Ctx256, 1) && Policy.ChooseLaunch(N(Policy.Ctx256) - 1, Policy.Ctx256, 2) == (Policy.Ctx192, 2) && Policy.ChooseLaunch(N(Policy.Ctx192, 2) - 1, Policy.Ctx256, 2) == (Policy.Ctx192, 1));
+        SelfTests.Check("typical 28.7 GB budget (logged loads that fell to 128K) now gets 192K with two slots", Policy.ChooseLaunch(28700, Policy.Ctx256, 2) == (Policy.Ctx192, 2));
+        SelfTests.Check("192K need lies between the measured 128K and 256K needs", N(Policy.Ctx128) < N(Policy.Ctx192) && N(Policy.Ctx192) < N(Policy.Ctx256));
         SelfTests.Check("128K choice never grows to 256K", Policy.ChooseLaunch(31488, Policy.Ctx128, 2).Context == Policy.Ctx128);
         SelfTests.Check("a lighter quant's smaller weights lower the requirement", Policy.ChooseLaunch(N(Policy.Ctx256) - 2000, Policy.Ctx256, 1, 2000) == (Policy.Ctx256, 1));
         SelfTests.Check("smaller contexts need less VRAM, never more", N(Policy.Ctx64) < N(Policy.Ctx96) && N(Policy.Ctx96) < N(Policy.Ctx128) && N(Policy.Ctx128, 2) - N(Policy.Ctx128) == Policy.SlotOverheadMiB);
-        SelfTests.Check("context choices are 128K and the trained 256K maximum",Policy.ContextChoices.SequenceEqual(new[]{131072,262144}) && Policy.ContextCap == 262144);
+        SelfTests.Check("context choices are 128K, 192K and the trained 256K maximum",Policy.ContextChoices.SequenceEqual(new[]{131072,196608,262144}) && Policy.ContextCap == 262144);
         var fakeRoot=Path.Combine(Path.GetTempPath(),"localqwen-ollama-"+Guid.NewGuid());
         var manifestDir=Path.Combine(fakeRoot,"manifests","registry.ollama.ai","orcarouter","Qwen3.8-27B-Uncensored");
         Directory.CreateDirectory(manifestDir); Directory.CreateDirectory(Path.Combine(fakeRoot,"blobs"));

@@ -102,7 +102,7 @@ internal sealed class TrayContext : ApplicationContext, TrayActions
         contextMenu = new(UiSpec.MenuLabels[2]);
         foreach (var tokens in Policy.ContextChoices)
         {
-            var item = new ToolStripMenuItem($"{Policy.ContextLabel(tokens)} tokens" + (tokens == Policy.Ctx256 ? " (needs ~29.4 GB free VRAM)" : "")) { Tag = tokens };
+            var item = new ToolStripMenuItem($"{Policy.ContextLabel(tokens)} tokens" + (tokens > Policy.Ctx128 ? $" (needs ~{(Policy.Need(tokens, 0) + Policy.HeadroomMiB) / 1024.0:F1} GB free VRAM)" : "")) { Tag = tokens };
             item.Click += (_, _) => SetContext((int)item.Tag!);
             contextMenu.DropDownItems.Add(item);
         }

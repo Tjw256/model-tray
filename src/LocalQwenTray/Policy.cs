@@ -24,10 +24,11 @@ internal static class Policy
     public const int DefaultVramWaitMinutes = 5, VramPollSeconds = 5;
     public static readonly int[] VramWaitChoices = [1, 5, 15, 30];
     // 256K is the model's trained context (n_ctx_train 262144); going beyond needs YaRN and degrades recall.
-    public const int Ctx64 = 65536, Ctx96 = 98304, Ctx128 = 131072, Ctx256 = 262144;
-    public static readonly int[] ContextChoices = [Ctx128, Ctx256];
+    public const int Ctx64 = 65536, Ctx96 = 98304, Ctx128 = 131072, Ctx192 = 196608, Ctx256 = 262144;
+    public static readonly int[] ContextChoices = [Ctx128, Ctx192, Ctx256];
     // When the chosen context does not fit (e.g. a video editor holds VRAM), the largest smaller one that fits is used.
-    public static readonly int[] FallbackContexts = [Ctx256, Ctx128, Ctx96, Ctx64];
+    // Context outranks the second slot: 256K x2, 256K x1, 192K x2, 192K x1, 128K x2, ... (owner decision 2026-10-12).
+    public static readonly int[] FallbackContexts = [Ctx256, Ctx192, Ctx128, Ctx96, Ctx64];
     public const int ContextCap = Ctx256, MinimumContext = Ctx64;
     // Two slots share one KV pool (--kv-unified; each can still use the whole context). A short request no longer
     // waits behind a long one: 12.7 s -> 1.2 s while a cached background conversation generated, which ran 7% slower
@@ -41,10 +42,11 @@ internal static class Policy
     public const string DefaultReasoning = "medium";   // owner choice 2026-10-09: balance of speed and thoroughness
     public static readonly string[] Variants = ["q5_K_M", "q4_K_M"];
     // Whole-engine VRAM for Q5_K_M with the vision projector: 128K measured 25,042 MiB (2026-10-08); 256K measured
-    // 28,531 MiB (2026-10-09, 17.6 s load, 157.5 tok/s, no spill). Below 128K the KV cache shrinks by ~22 MiB per
+    // 28,531 MiB (2026-10-09, 17.6 s load, 157.5 tok/s, no spill). 192K measured 26,732 MiB (2026-10-12, 1 slot, 66/66
+    // layers on GPU, 18 s load). Below 128K the KV cache shrinks by ~22 MiB per
     // 1K tokens; 20 is used so smaller contexts are never over-promised. A lighter quant needs less by roughly its
     // smaller weights file.
-    public const int Q5Need128 = 25042, Q5Need256 = 28531, MiBPer1KBelow128 = 20, MarginMiB = 400, HeadroomMiB = 512;
+    public const int Q5Need128 = 25042, Q5Need192 = 26732, Q5Need256 = 28531, MiBPer1KBelow128 = 20, MarginMiB = 400, HeadroomMiB = 512;
     // Weights-file size of the reference quant the needs were measured with (Q5_K_M, 18,631 MiB).
     public const int ReferenceWeightsMiB = 18631;
     // These numbers are specific to Qwen3.8 27B on a 32 GB card: re-measure them for another model or GPU.
@@ -54,7 +56,7 @@ internal static class Policy
     // into system RAM, so loads are checked up front instead. CUDA does not evict other apps' VRAM.
     public static int Need(int context, int weightSavingMiB, int slots = 1)
     {
-        int engine = context >= Ctx256 ? Q5Need256 : context >= Ctx128 ? Q5Need128 : Q5Need128 - (Ctx128 - context) / 1024 * MiBPer1KBelow128;
+        int engine = context >= Ctx256 ? Q5Need256 : context >= Ctx192 ? Q5Need192 : context >= Ctx128 ? Q5Need128 : Q5Need128 - (Ctx128 - context) / 1024 * MiBPer1KBelow128;
         return engine - weightSavingMiB + MarginMiB + (Math.Max(1, slots) - 1) * SlotOverheadMiB;
     }
     public static int MinimumBudgetMiB => Need(Ctx64, 0);

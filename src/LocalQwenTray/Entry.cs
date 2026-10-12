@@ -100,7 +100,7 @@ internal static class UiSmokeTests
                 Item(context, "Context").DropDownItems.OfType<ToolStripMenuItem>().Single(x => (int)x.Tag! == Policy.Ctx256).PerformClick();
                 Item(context, "Model").DropDownItems.OfType<ToolStripMenuItem>().Single(x => (string)x.Tag! == "q5_K_M").PerformClick();
                 await supervisor.LoadNow(default);
-                if (host.LastContext != Policy.Ctx128 || !supervisor.IsReady) throw new Exception("256K should fall back to 128K when VRAM is short");
+                if (host.LastContext != Policy.Ctx192 || !supervisor.IsReady) throw new Exception("256K should fall back to 192K when VRAM is short");
                 Console.WriteLine("PASS 256K falls back to 128K when free VRAM is short");
                 await supervisor.Unload(default); host.Free = 32000;
                 Item(context, "Reasoning").DropDownItems.OfType<ToolStripMenuItem>().Single(x => (string)x.Tag! == "xhigh").PerformClick();
