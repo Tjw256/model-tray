@@ -12,7 +12,8 @@ namespace LocalQwenTray;
 // Loopback OpenAI-compatible front door. Clients keep using http://127.0.0.1:8000/v1 with the same key;
 // the request is held while the model loads on demand, then streamed through to the private llama-server.
 // For chat requests it also applies the tray's thinking defaults (see ApplyThinkingDefaults).
-internal sealed class Gateway(Supervisor supervisor, string key, int publicPort, int backendPort, string stateDirectory, Action<string>? log = null, Func<string>? reasoning = null, AppConfig? config = null, NativeHost? native = null) : IAsyncDisposable
+// /v1/embeddings goes to the separate embedding engine (embeddings starts it and returns its port); it never wakes the GPU.
+internal sealed class Gateway(Supervisor supervisor, string key, int publicPort, int backendPort, string stateDirectory, Action<string>? log = null, Func<string>? reasoning = null, AppConfig? config = null, NativeHost? native = null, Func<CancellationToken, Task<int>>? embeddings = null) : IAsyncDisposable
 {
     WebApplication? app;
     readonly HttpClient backend = new(new SocketsHttpHandler { UseProxy = false, AutomaticDecompression = DecompressionMethods.None, PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30) }) { Timeout = Timeout.InfiniteTimeSpan };
@@ -51,7 +52,7 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         }
         if (HttpMethods.IsGet(ctx.Request.Method) && path == "/v1/profiles")
         {
-            await Json(ctx, 200, System.Text.Json.JsonSerializer.Serialize(new { profiles = config?.Profiles.Select(p => new { name = p.Key, context_tokens = p.Value.ContextTokens, slots = p.Value.Slots, fingerprint_url = "/v1/profiles/" + p.Key + "/fingerprint" }) }));
+            await Json(ctx, 200, System.Text.Json.JsonSerializer.Serialize(new { profiles = config?.Profiles.Select(p => new { name = p.Key, context_tokens = p.Value.ContextTokens, slots = p.Value.Slots, background = p.Value.Background, fingerprint_url = "/v1/profiles/" + p.Key + "/fingerprint" }) }));
             return;
         }
         if (HttpMethods.IsGet(ctx.Request.Method) && path.StartsWith("/v1/profiles/") && path.EndsWith("/fingerprint"))
@@ -67,12 +68,15 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         {
             var models = new List<object> { new { id = Policy.Model, @object = "model", owned_by = "llamacpp", meta = new { n_ctx = native?.CodingContext ?? Policy.Ctx128 } } };
             models.AddRange(config.Profiles.Select(p => (object)new { id = p.Key, @object = "model", owned_by = "llamacpp", meta = new { n_ctx = p.Value.ContextTokens } }));
+            if (embeddings is not null) models.Add(new { id = Policy.EmbeddingModel, @object = "model", owned_by = "llamacpp", meta = new { n_ctx = 2048 } });
             await Json(ctx, 200, System.Text.Json.JsonSerializer.Serialize(new { @object = "list", data = models }));
             return;
         }
         if (modelList && !supervisor.IsReady) { await Json(ctx, 200, CachedModels()); return; } // listing never wakes the GPU
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         byte[]? requestBody = null;
-        string? profile = null;
+        string? profile = null, requested = null;
+        bool background = false;
         if (ctx.Request.ContentLength > 0 || ctx.Request.Headers.TransferEncoding.Count > 0)
         {
             using var buffer = new MemoryStream();
@@ -80,25 +84,112 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
             requestBody = buffer.ToArray();
             try
             {
-                if (JsonNode.Parse(requestBody) is JsonObject json && json["model"] is JsonValue model && model.TryGetValue<string>(out var name) && config?.Profiles.ContainsKey(name) == true) profile = name;
+                if (JsonNode.Parse(requestBody) is JsonObject json && json["model"] is JsonValue model && model.TryGetValue<string>(out var name))
+                {
+                    requested = name;
+                    if (config?.Profiles.TryGetValue(name, out var named) == true) (profile, background) = (name, named.Background);
+                }
             }
             catch (System.Text.Json.JsonException) { /* the backend reports invalid input as before */ }
         }
+        if (embeddings is not null && HttpMethods.IsPost(ctx.Request.Method) && path is "/v1/embeddings" or "/embeddings")
+        {
+            await Embed(ctx, path, requestBody, requested, started, embeddings);
+            return;
+        }
         IDisposable lease;
-        try { lease = await supervisor.AdmitRequest(profile, ctx.RequestAborted); }
+        try { lease = await supervisor.AdmitRequest(profile, ctx.RequestAborted, background); }
         catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { return; }
         catch (Exception ex) { log?.Invoke("On-demand load failed: " + ex.Message); await Error(ctx, 503, "Local Qwen could not load: " + ex.Message, "server_error"); return; }
+        var admitted = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+        string outcome = "client gone", timings = "";
+        bool retried = false;
         using (lease)
-        try { await Forward(ctx, path, modelList, requestBody, profile is null); }
-        catch (Exception ex) when (ex is HttpRequestException or IOException)
+        try
         {
-            // Backend vanished (crash or external stop): refresh state so the next request reloads.
-            log?.Invoke("Backend request failed: " + ex.Message);
-            await supervisor.Controller.Monitor(CancellationToken.None);
-            if (ctx.Response.HasStarted) ctx.Abort();
-            else await Error(ctx, 502, "Local Qwen backend is not reachable; retry to reload it", "server_error");
+            for (int attempt = 1; ; attempt++)
+            {
+                try { (outcome, timings) = await Forward(ctx, path, modelList, requestBody, profile is null, backendPort); break; }
+                catch (Exception ex) when (ex is HttpRequestException or IOException)
+                {
+                    // Backend vanished (crash or external stop): refresh state so the next request reloads.
+                    log?.Invoke("Backend request failed: " + ex.Message);
+                    await supervisor.Controller.Monitor(CancellationToken.None);
+                    if (ctx.Response.HasStarted) { ctx.Abort(); outcome = "aborted mid-reply"; break; }
+                    // Nothing reached the client and the engine is gone: reload the same profile and
+                    // retry once. A second failure (say a request that crashes the engine) is returned.
+                    if (attempt == 1 && !supervisor.IsReady)
+                    {
+                        retried = true;
+                        ctx.Response.Clear();
+                        log?.Invoke("Engine died before replying; reloading and retrying the request once");
+                        try { await supervisor.EnsureReady(ctx.RequestAborted); continue; }
+                        catch (Exception reload) when (reload is not OperationCanceledException)
+                        {
+                            outcome = "503";
+                            await Error(ctx, 503, "Local Qwen could not reload after the engine stopped: " + reload.Message, "server_error");
+                            break;
+                        }
+                    }
+                    outcome = "502";
+                    await Error(ctx, 502, "Local Qwen backend is not reachable; retry to reload it", "server_error");
+                    break;
+                }
+            }
         }
         catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { /* client went away; upstream request is cancelled too */ }
+        finally
+        {
+            var total = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+            log?.Invoke(FormattableString.Invariant($"Request {ctx.Request.Method} {path} model {Token(requested)} profile {profile ?? "default"} -> {outcome}{(retried ? " after one engine reload" : "")}, waited {admitted.TotalSeconds:0.0} s, total {total.TotalSeconds:0.0} s{timings}, client {Token(ctx.Request.Headers.UserAgent.ToString())}"));
+        }
+    }
+
+    // Embeddings bypass admission: the engine is separate, small and CPU-only, so it never waits for or switches the
+    // chat model. A request that finds the engine dead before the first byte restarts it and is retried once.
+    async Task Embed(HttpContext ctx, string path, byte[]? requestBody, string? requested, long started, Func<CancellationToken, Task<int>> engine)
+    {
+        string outcome = "client gone";
+        bool retried = false;
+        try
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                int port;
+                try { port = await engine(ctx.RequestAborted); }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    log?.Invoke("Embedding engine could not start: " + ex.Message);
+                    outcome = "503";
+                    await Error(ctx, 503, "Local Qwen embedding engine could not start: " + ex.Message, "server_error");
+                    break;
+                }
+                try { (outcome, _) = await Forward(ctx, path, false, requestBody, false, port); break; }
+                catch (Exception ex) when (ex is HttpRequestException or IOException)
+                {
+                    log?.Invoke("Embedding request failed: " + ex.Message);
+                    if (ctx.Response.HasStarted) { ctx.Abort(); outcome = "aborted mid-reply"; break; }
+                    if (attempt == 1) { retried = true; ctx.Response.Clear(); continue; }
+                    outcome = "502";
+                    await Error(ctx, 502, "Local Qwen embedding engine is not reachable", "server_error");
+                    break;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { /* client went away */ }
+        finally
+        {
+            var total = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+            log?.Invoke(FormattableString.Invariant($"Request {ctx.Request.Method} {path} model {Token(requested)} profile embeddings -> {outcome}{(retried ? " after one engine restart" : "")}, total {total.TotalSeconds:0.0} s, client {Token(ctx.Request.Headers.UserAgent.ToString())}"));
+        }
+    }
+
+    // Client-supplied names go into the log as one short token without spaces or control characters.
+    static string Token(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "-";
+        var token = new string(value.Trim().Split(' ')[0].Where(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_' or '/' or ':').Take(48).ToArray());
+        return token.Length == 0 ? "-" : token;
     }
 
     bool Authorized(HttpRequest request)
@@ -108,9 +199,10 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         return request.Headers.TryGetValue("x-api-key", out var alt) && alt.ToString() == key;
     }
 
-    async Task Forward(HttpContext ctx, string path, bool cacheModels, byte[]? requestBody, bool applyDefaults)
+    // Returns the status sent to the client and llama-server's timing summary for the request log.
+    async Task<(string Status, string Timings)> Forward(HttpContext ctx, string path, bool cacheModels, byte[]? requestBody, bool applyDefaults, int port)
     {
-        var target = $"http://127.0.0.1:{backendPort}{path}{ctx.Request.QueryString}";
+        var target = $"http://127.0.0.1:{port}{path}{ctx.Request.QueryString}";
         using var upstream = new HttpRequestMessage(new HttpMethod(ctx.Request.Method), target);
         bool chat = HttpMethods.IsPost(ctx.Request.Method) && path is "/v1/chat/completions" or "/chat/completions" or "/v1/responses";
         if (requestBody is not null)
@@ -142,7 +234,7 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
             whole?.Write(buffer, 0, n);
         }
         if (whole is not null && response.IsSuccessStatusCode) TryWrite(ModelsCachePath, whole.ToArray());
-        if (response.IsSuccessStatusCode) RecordTimings(tail.Text());
+        return (((int)response.StatusCode).ToString(), response.IsSuccessStatusCode ? RecordTimings(tail.Text()) : "");
     }
 
     // Thinking text is the slow part of Qwen3.8 output, so the tray sets the thinking effort (low/medium/xhigh) and
@@ -160,15 +252,16 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         return Encoding.UTF8.GetBytes(request.ToJsonString());
     }
 
-    // llama-server reports timings in the final JSON (or final SSE chunk); surface the last reply's speed in the UI.
-    void RecordTimings(string text)
+    // llama-server reports timings in the final JSON (or final SSE chunk); surface the last reply's speed in the UI
+    // and summarize prompt, prompt-cache reuse and output for the request log.
+    string RecordTimings(string text)
     {
-        var tps = Regex.Matches(text, "\"predicted_per_second\"\\s*:\\s*([0-9.]+)");
-        var count = Regex.Matches(text, "\"predicted_n\"\\s*:\\s*([0-9]+)");
-        if (tps.Count > 0 && count.Count > 0 &&
-            double.TryParse(tps[^1].Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var rate) &&
-            int.TryParse(count[^1].Groups[1].Value, out var tokens) && tokens > 0)
-            supervisor.RecordReply(tokens, rate);
+        string? Last(string field) => Regex.Matches(text, "\"" + field + "\"\\s*:\\s*([0-9.]+)") is { Count: > 0 } m ? m[^1].Groups[1].Value : null;
+        if (!int.TryParse(Last("predicted_n"), out var tokens)) return "";
+        double.TryParse(Last("predicted_per_second"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var rate);
+        if (tokens > 0 && rate > 0) supervisor.RecordReply(tokens, rate);
+        // prompt_n counts only the tokens processed for this request; cache_n the ones reused from the slot.
+        return FormattableString.Invariant($", prompt {Last("prompt_n") ?? "?"} new + {Last("cache_n") ?? "?"} cached, output {tokens} at {rate:0.0} tok/s");
     }
 
     string CachedModels()

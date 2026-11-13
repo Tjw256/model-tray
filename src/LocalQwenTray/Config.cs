@@ -18,6 +18,8 @@ internal sealed class AppConfig
     // Optional command run after a load whose context differs from the last one; "{context}" is replaced
     // by the allocated token count. Use it to update your clients' context settings.
     public string[]? ClientSyncCommand { get; set; }
+    // GGUF served on /v1/embeddings; empty = Ollama's downloaded nomic-embed-text:latest blob.
+    public string EmbeddingModel { get; set; } = "";
     public Dictionary<string, ModelProfile> Profiles { get; set; } = new() { ["savannah-extraction"] = ModelProfile.Savannah() };
 
     static readonly JsonSerializerOptions Pretty = new() { WriteIndented = true };

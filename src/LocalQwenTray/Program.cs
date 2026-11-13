@@ -91,10 +91,11 @@ internal static class Program
             MigrateLegacyEngine(host, controller, log);
             Gateway? gateway = null;
             var gatewayLog = log;
+            var embedding = new EmbeddingEngine(config, http, stateDirectory);
             async Task<string?> EnsureGateway()
             {
                 if (gateway is not null) return null;
-                var candidate = new Gateway(supervisor, key, Policy.PublicPort, Policy.BackendPort, stateDirectory, gatewayLog.Write, () => settings.ReasoningOrDefault, config, host);
+                var candidate = new Gateway(supervisor, key, Policy.PublicPort, Policy.BackendPort, stateDirectory, gatewayLog.Write, () => settings.ReasoningOrDefault, config, host, embedding.EnsureReady);
                 try { await candidate.StartAsync(); gateway = candidate; gatewayLog.Write($"Listening on http://127.0.0.1:{Policy.PublicPort}/v1 (model loads on demand)"); return null; }
                 catch (Exception ex)
                 {
@@ -105,6 +106,8 @@ internal static class Program
             using var context = new TrayContext(supervisor, host, log, settings, stateDirectory, EnsureGateway, apiKey: key);
             Application.Run(context);
             gateway?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            try { using var stopping = new CancellationTokenSource(TimeSpan.FromSeconds(10)); embedding.Stop(stopping.Token).GetAwaiter().GetResult(); }
+            catch (Exception ex) { log.Write("Embedding engine stop failed: " + ex.Message); }
             return 0;
         }
         catch (Exception ex)

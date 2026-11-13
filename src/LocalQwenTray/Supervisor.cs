@@ -46,14 +46,14 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
     public Controller Controller => controller;
     public string? LoadedProfile => IsReady ? host?.SelectedProfile ?? "default" : null;
 
-    public async Task<IDisposable> AdmitRequest(string? profile, CancellationToken ct)
+    public async Task<IDisposable> AdmitRequest(string? profile, CancellationToken ct, bool background = false)
     {
         var activity = BeginRequest();
         try
         {
             ProfileAdmission router;
-            lock (sync) router = admission ??= new ProfileAdmission(SelectProfile);
-            return new RequestLease(await router.Enter(profile, ct), activity);
+            lock (sync) router = admission ??= new ProfileAdmission(SelectProfile, now, pause);
+            return new RequestLease(await router.Enter(profile, ct, background), activity);
         }
         catch { activity.Dispose(); throw; }
     }

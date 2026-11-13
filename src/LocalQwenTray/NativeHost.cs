@@ -12,16 +12,19 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
 {
     readonly string key = config.ApiKey;
     public string? SelectedProfile { get; set; }
-    public string? OwnedProfile => ReadIdentity() is { } id && OwnedNativeProcess.Matches(id.Pid,id.StartTimeUtcTicks,Executable) ? id.Profile : null;
+    public string? OwnedProfile => ReadIdentity() is { } id && OwnedNativeProcess.Matches(id.Pid,id.StartTimeUtcTicks,ExecutableFor(id.Profile)) ? id.Profile : null;
     ModelProfile? Profile => SelectedProfile is null ? null : config.Profiles[SelectedProfile];
     int? codingContext;
     public int CodingContext => SelectedProfile is null && Loaded() is { } loaded ? loaded.Context : codingContext ?? Choice.Context;
     public async Task<object> Fingerprint(string name, CancellationToken ct)
     {
-        if (ReadIdentity() is { } id && OwnedNativeProcess.Matches(id.Pid,id.StartTimeUtcTicks,Executable) && id.Profile == name && id.Fingerprint is { } fingerprint) return fingerprint;
-        return await ProfileFingerprint.Read(name, config.Profiles[name], Executable, LogPath, ct);
+        if (ReadIdentity() is { } id && OwnedNativeProcess.Matches(id.Pid,id.StartTimeUtcTicks,ExecutableFor(name)) && id.Profile == name && id.Fingerprint is { } fingerprint) return fingerprint;
+        return await ProfileFingerprint.Read(name, config.Profiles[name], ExecutableFor(name), LogPath, ct);
     }
-    public string Executable => Path.GetFullPath(config.LlamaServer);
+    // Each profile may pin its own llama-server build. Ownership of a running engine is always checked
+    // against the build configured for the profile it was launched with, not the one selected now.
+    public string Executable => ExecutableFor(SelectedProfile);
+    string ExecutableFor(string? profile) => profile is not null && config.Profiles.TryGetValue(profile, out var p) ? p.Engine(config) : Path.GetFullPath(config.LlamaServer);
     public LaunchChoice Choice { get; set; } = LaunchChoice.Default;
     // Called with the allocated context after each verified load (the tray keeps OpenCode's limit in step).
     public Action<int>? ContextLoaded { get; set; }
@@ -89,7 +92,7 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
     }
     // Polling establishes liveness only. Launch and termination still require the complete
     // PID + creation-time + executable identity, so a reused PID can never be terminated.
-    bool Valid(NativeIdentity identity) => string.Equals(Path.GetFullPath(identity.Executable),Executable,StringComparison.OrdinalIgnoreCase) && OwnedNativeProcess.Exists(identity.Pid);
+    bool Valid(NativeIdentity identity) => string.Equals(Path.GetFullPath(identity.Executable),ExecutableFor(identity.Profile),StringComparison.OrdinalIgnoreCase) && OwnedNativeProcess.Exists(identity.Pid);
     public Task<EngineState> Inspect(CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
@@ -173,7 +176,7 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
         {
             using var process=Process.GetProcessById(identity.Pid);
             // Recheck this handle, not just the PID, immediately before termination.
-            if(!OwnedNativeProcess.MatchesHandle(process,identity.StartTimeUtcTicks,Executable)) throw new InvalidOperationException("Process ownership changed; refusing Stop");
+            if(!OwnedNativeProcess.MatchesHandle(process,identity.StartTimeUtcTicks,ExecutableFor(identity.Profile))) throw new InvalidOperationException("Process ownership changed; refusing Stop");
             if(!process.HasExited) process.Kill();
             await process.WaitForExitAsync(ct);
         }
