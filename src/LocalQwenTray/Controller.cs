@@ -5,6 +5,7 @@ internal record EngineState(bool Exists, bool Running, int ExitCode);
 internal record ProbeResult(bool Ready, bool Mismatch = false, string Detail = "");
 internal interface IQwenHost
 {
+    string? SelectedProfile { get; set; }
     Task<IDisposable> AcquireLease(CancellationToken ct);
     Task<EngineState> Inspect(CancellationToken ct);
     Task<GpuMemory> FreeVram(CancellationToken ct);

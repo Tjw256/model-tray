@@ -12,7 +12,7 @@ namespace LocalQwenTray;
 // Loopback OpenAI-compatible front door. Clients keep using http://127.0.0.1:8000/v1 with the same key;
 // the request is held while the model loads on demand, then streamed through to the private llama-server.
 // For chat requests it also applies the tray's thinking defaults (see ApplyThinkingDefaults).
-internal sealed class Gateway(Supervisor supervisor, string key, int publicPort, int backendPort, string stateDirectory, Action<string>? log = null, Func<string>? reasoning = null) : IAsyncDisposable
+internal sealed class Gateway(Supervisor supervisor, string key, int publicPort, int backendPort, string stateDirectory, Action<string>? log = null, Func<string>? reasoning = null, AppConfig? config = null, NativeHost? native = null) : IAsyncDisposable
 {
     WebApplication? app;
     readonly HttpClient backend = new(new SocketsHttpHandler { UseProxy = false, AutomaticDecompression = DecompressionMethods.None, PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30) }) { Timeout = Timeout.InfiniteTimeSpan };
@@ -41,19 +41,62 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         var path = ctx.Request.Path.Value ?? "/";
         if (path is "/health" or "/v1/health") { await Json(ctx, 200, "{\"status\":\"ok\"}"); return; }
         if (!Authorized(ctx.Request)) { await Error(ctx, 401, "Invalid API Key", "authentication_error"); return; }
+        if (HttpMethods.IsGet(ctx.Request.Method) && path == "/v1/status")
+        {
+            GpuMemory? memory = null;
+            try { if (native is not null) memory = await native.FreeVram(ctx.RequestAborted); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { log?.Invoke("VRAM poll failed: " + ex.Message); }
+            await Json(ctx, 200, System.Text.Json.JsonSerializer.Serialize(new { loaded_profile = supervisor.LoadedProfile, state = supervisor.IsUnloading ? "unloading" : supervisor.State.ToString().ToLowerInvariant(), busy = supervisor.InFlight > 0, in_flight = supervisor.InFlight, free_vram_mib = memory?.FreeMiB }));
+            return;
+        }
+        if (HttpMethods.IsGet(ctx.Request.Method) && path == "/v1/profiles")
+        {
+            await Json(ctx, 200, System.Text.Json.JsonSerializer.Serialize(new { profiles = config?.Profiles.Select(p => new { name = p.Key, context_tokens = p.Value.ContextTokens, slots = p.Value.Slots, fingerprint_url = "/v1/profiles/" + p.Key + "/fingerprint" }) }));
+            return;
+        }
+        if (HttpMethods.IsGet(ctx.Request.Method) && path.StartsWith("/v1/profiles/") && path.EndsWith("/fingerprint"))
+        {
+            string name = path["/v1/profiles/".Length..^"/fingerprint".Length];
+            if (native is null || config?.Profiles.ContainsKey(name) != true) { await Error(ctx, 404, "Unknown profile", "invalid_request_error"); return; }
+            try { await Json(ctx, 200, System.Text.Json.JsonSerializer.Serialize(await native.Fingerprint(name, ctx.RequestAborted))); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { await Error(ctx, 503, "Profile fingerprint unavailable: " + ex.Message, "server_error"); }
+            return;
+        }
         bool modelList = HttpMethods.IsGet(ctx.Request.Method) && path is "/v1/models" or "/models";
+        if (modelList && config is not null)
+        {
+            var models = new List<object> { new { id = Policy.Model, @object = "model", owned_by = "llamacpp", meta = new { n_ctx = native?.CodingContext ?? Policy.Ctx128 } } };
+            models.AddRange(config.Profiles.Select(p => (object)new { id = p.Key, @object = "model", owned_by = "llamacpp", meta = new { n_ctx = p.Value.ContextTokens } }));
+            await Json(ctx, 200, System.Text.Json.JsonSerializer.Serialize(new { @object = "list", data = models }));
+            return;
+        }
         if (modelList && !supervisor.IsReady) { await Json(ctx, 200, CachedModels()); return; } // listing never wakes the GPU
-        using var lease = supervisor.BeginRequest();
-        try { await supervisor.EnsureReady(ctx.RequestAborted); }
+        byte[]? requestBody = null;
+        string? profile = null;
+        if (ctx.Request.ContentLength > 0 || ctx.Request.Headers.TransferEncoding.Count > 0)
+        {
+            using var buffer = new MemoryStream();
+            await ctx.Request.Body.CopyToAsync(buffer, ctx.RequestAborted);
+            requestBody = buffer.ToArray();
+            try
+            {
+                if (JsonNode.Parse(requestBody) is JsonObject json && json["model"] is JsonValue model && model.TryGetValue<string>(out var name) && config?.Profiles.ContainsKey(name) == true) profile = name;
+            }
+            catch (System.Text.Json.JsonException) { /* the backend reports invalid input as before */ }
+        }
+        IDisposable lease;
+        try { lease = await supervisor.AdmitRequest(profile, ctx.RequestAborted); }
         catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { return; }
         catch (Exception ex) { log?.Invoke("On-demand load failed: " + ex.Message); await Error(ctx, 503, "Local Qwen could not load: " + ex.Message, "server_error"); return; }
-        try { await Forward(ctx, path, modelList); }
-        catch (HttpRequestException ex) when (!ctx.Response.HasStarted)
+        using (lease)
+        try { await Forward(ctx, path, modelList, requestBody, profile is null); }
+        catch (Exception ex) when (ex is HttpRequestException or IOException)
         {
             // Backend vanished (crash or external stop): refresh state so the next request reloads.
             log?.Invoke("Backend request failed: " + ex.Message);
-            _ = supervisor.Controller.Monitor(CancellationToken.None);
-            await Error(ctx, 502, "Local Qwen backend is not reachable; retry to reload it", "server_error");
+            await supervisor.Controller.Monitor(CancellationToken.None);
+            if (ctx.Response.HasStarted) ctx.Abort();
+            else await Error(ctx, 502, "Local Qwen backend is not reachable; retry to reload it", "server_error");
         }
         catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { /* client went away; upstream request is cancelled too */ }
     }
@@ -65,22 +108,14 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         return request.Headers.TryGetValue("x-api-key", out var alt) && alt.ToString() == key;
     }
 
-    async Task Forward(HttpContext ctx, string path, bool cacheModels)
+    async Task Forward(HttpContext ctx, string path, bool cacheModels, byte[]? requestBody, bool applyDefaults)
     {
         var target = $"http://127.0.0.1:{backendPort}{path}{ctx.Request.QueryString}";
         using var upstream = new HttpRequestMessage(new HttpMethod(ctx.Request.Method), target);
-        bool hasBody = ctx.Request.ContentLength > 0 || ctx.Request.Headers.TransferEncoding.Count > 0;
         bool chat = HttpMethods.IsPost(ctx.Request.Method) && path is "/v1/chat/completions" or "/chat/completions" or "/v1/responses";
-        if (hasBody && chat && reasoning is not null)
+        if (requestBody is not null)
         {
-            using var requestBody = new MemoryStream();
-            await ctx.Request.Body.CopyToAsync(requestBody, ctx.RequestAborted);
-            upstream.Content = new ByteArrayContent(ApplyThinkingDefaults(requestBody.ToArray(), reasoning()));
-        }
-        else if (hasBody)
-        {
-            upstream.Content = new StreamContent(ctx.Request.Body);
-            if (ctx.Request.ContentLength is long length) upstream.Content.Headers.ContentLength = length;
+            upstream.Content = new ByteArrayContent(applyDefaults && chat && reasoning is not null ? ApplyThinkingDefaults(requestBody, reasoning()) : requestBody);
         }
         foreach (var (name, values) in ctx.Request.Headers)
         {
@@ -118,10 +153,8 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         JsonNode? root;
         try { root = JsonNode.Parse(body); } catch (System.Text.Json.JsonException) { return body; }
         if (root is not JsonObject request) return body;
-        var kwargs = request["chat_template_kwargs"] as JsonObject;
-        if (kwargs is null) { if (request.ContainsKey("chat_template_kwargs")) return body; request["chat_template_kwargs"] = kwargs = new JsonObject(); }
-        if (!kwargs.ContainsKey("reasoning_effort") && !request.ContainsKey("reasoning_effort")) kwargs["reasoning_effort"] = effort;
-        if (!kwargs.ContainsKey("preserve_thinking")) kwargs["preserve_thinking"] = false;
+        if (request.Any(p => p.Key == "chat_template_kwargs" || p.Key.StartsWith("reasoning", StringComparison.Ordinal) || p.Key.Contains("thinking", StringComparison.Ordinal))) return body;
+        request["chat_template_kwargs"] = new JsonObject { ["reasoning_effort"] = effort, ["preserve_thinking"] = false };
         return Encoding.UTF8.GetBytes(request.ToJsonString());
     }
 
