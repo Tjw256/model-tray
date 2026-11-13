@@ -9,6 +9,7 @@ namespace LocalQwenTray;
 // Real Kestrel gateway against a fake llama-server on random loopback ports: no GPU, no port 8000.
 internal static class GatewayTests
 {
+    static string[] EmbeddingEngine_Args() => LocalQwenTray.EmbeddingEngine.BuildArguments("model.gguf", "embedding.log");
     static int FreePort() { var l = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0); l.Start(); int p = ((IPEndPoint)l.LocalEndpoint).Port; l.Stop(); return p; }
     public static async Task Run()
     {
@@ -128,7 +129,15 @@ internal static class GatewayTests
         var profileSupervisor = new Supervisor(new Controller(profileHost), clock: () => DateTimeOffset.Now + skipped, host: profileHost, delay: (d, _) => { skipped += d; return Task.CompletedTask; });
         int profilePort = FreePort();
         var lines = new List<string>();
-        await using var profileGateway = new Gateway(profileSupervisor, key, profilePort, backendPort, dir, log: line => { lock (lines) lines.Add(line); }, reasoning: () => "low", config: profiles);
+        int embedStarts = 0;
+        bool embedMissing = false;
+        Task<int> EmbeddingEngine(CancellationToken _)
+        {
+            if (embedMissing) throw new FileNotFoundException("nomic-embed-text is not downloaded in Ollama");
+            embedStarts++;
+            return Task.FromResult(backendPort);
+        }
+        await using var profileGateway = new Gateway(profileSupervisor, key, profilePort, backendPort, dir, log: line => { lock (lines) lines.Add(line); }, reasoning: () => "low", config: profiles, embeddings: EmbeddingEngine);
         await profileGateway.StartAsync();
         using var profileClient = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{profilePort}"), Timeout = TimeSpan.FromSeconds(10) };
         using (var listing = await profileClient.SendAsync(Req(HttpMethod.Get, "/v1/models")))
@@ -175,12 +184,27 @@ internal static class GatewayTests
         dieBeforeReply = 2;
         using (var result = await profileClient.SendAsync(Req(HttpMethod.Post, "/v1/chat/completions", "{\"die_before_reply\":true}")))
             SelfTests.Check("a request that kills the engine twice gets 502 after one reload", result.StatusCode == HttpStatusCode.BadGateway && profileHost.UpCalls == loads + 2);
+        int chatLoads = profileHost.UpCalls;
+        const string embedJson = "{\"model\":\"nomic-embed-text\",\"input\":[\"search_query: a\",\"b\"]}";
+        using (var result = await profileClient.SendAsync(Req(HttpMethod.Post, "/v1/embeddings", embedJson)))
+            SelfTests.Check("embeddings go to the embedding engine untouched and never load the chat model", result.IsSuccessStatusCode && backendBody == embedJson && embedStarts == 1 && profileHost.UpCalls == chatLoads);
+        dieBeforeReply = 1;
+        using (var result = await profileClient.SendAsync(Req(HttpMethod.Post, "/v1/embeddings", "{\"input\":\"x\",\"die_before_reply\":true}")))
+            SelfTests.Check("embedding engine death before the reply restarts it and retries once", result.IsSuccessStatusCode && embedStarts == 3);
+        embedMissing = true;
+        using (var result = await profileClient.SendAsync(Req(HttpMethod.Post, "/v1/embeddings", embedJson)))
+            SelfTests.Check("an embedding engine that cannot start returns 503 with the reason", result.StatusCode == HttpStatusCode.ServiceUnavailable && (await result.Content.ReadAsStringAsync()).Contains("not downloaded"));
+        using (var listing = await profileClient.SendAsync(Req(HttpMethod.Get, "/v1/models")))
+            SelfTests.Check("model listing advertises the embedding model", (await listing.Content.ReadAsStringAsync()).Contains("\"id\":\"nomic-embed-text\""));
+        SelfTests.Check("embedding engine runs CPU-only at the model's trained context", EmbeddingEngine_Args() is var e && e[Array.IndexOf(e, "--device") + 1] == "none" && e[Array.IndexOf(e, "-c") + 1] == "2048" && e[Array.IndexOf(e, "-ub") + 1] == "2048" && e.Contains("--embeddings"));
         string[] logged;
         lock (lines) logged = [.. lines];
         SelfTests.Check("one log line per request with model, profile, status and cache reuse",
             logged.Any(l => l.StartsWith("Request POST /v1/chat/completions model savannah-extraction profile savannah-extraction -> 200,") && l.Contains("prompt 3 new + 5 cached, output 7 at 160.0 tok/s"))
             && logged.Count(l => l.StartsWith("Request POST /v1/chat/completions model - profile default -> 200 after one engine reload,")) == 1
-            && logged.Any(l => l.StartsWith("Request POST /v1/chat/completions model - profile default -> 502 after one engine reload,")));
+            && logged.Any(l => l.StartsWith("Request POST /v1/chat/completions model - profile default -> 502 after one engine reload,"))
+            && logged.Any(l => l.StartsWith("Request POST /v1/embeddings model nomic-embed-text profile embeddings -> 200,"))
+            && logged.Any(l => l.StartsWith("Request POST /v1/embeddings model - profile embeddings -> 200 after one engine restart,")));
         SelfTests.Check("request log never contains request content", !logged.Any(l => l.Contains("private words")));
         await backend.StopAsync();
         try { Directory.Delete(dir, true); } catch (IOException) { }

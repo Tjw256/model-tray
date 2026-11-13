@@ -16,7 +16,8 @@ internal static class Policy
     public static string Model { get; set; } = "qwen3.8-27b-uncensored-q5_k_m";   // from config.json ModelName
     // Clients always talk to the tray's gateway on PublicPort; llama-server is private on BackendPort and is
     // loaded on the first request, then unloaded after the idle timeout (owner decision 2026-10-08).
-    public const int PublicPort = 8000, BackendPort = 18081;
+    public const int PublicPort = 8000, BackendPort = 18081, EmbeddingPort = 18082;
+    public const string EmbeddingModel = "nomic-embed-text";   // name advertised for /v1/embeddings
     public const int DefaultIdleMinutes = 5;
     public static readonly int?[] IdleChoices = [1, 5, 15, 30, 60, null];
     // After a load fails for lack of VRAM: one notification, then requests wait this long while free VRAM is polled

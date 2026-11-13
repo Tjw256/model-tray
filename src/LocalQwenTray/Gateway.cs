@@ -12,7 +12,8 @@ namespace LocalQwenTray;
 // Loopback OpenAI-compatible front door. Clients keep using http://127.0.0.1:8000/v1 with the same key;
 // the request is held while the model loads on demand, then streamed through to the private llama-server.
 // For chat requests it also applies the tray's thinking defaults (see ApplyThinkingDefaults).
-internal sealed class Gateway(Supervisor supervisor, string key, int publicPort, int backendPort, string stateDirectory, Action<string>? log = null, Func<string>? reasoning = null, AppConfig? config = null, NativeHost? native = null) : IAsyncDisposable
+// /v1/embeddings goes to the separate embedding engine (embeddings starts it and returns its port); it never wakes the GPU.
+internal sealed class Gateway(Supervisor supervisor, string key, int publicPort, int backendPort, string stateDirectory, Action<string>? log = null, Func<string>? reasoning = null, AppConfig? config = null, NativeHost? native = null, Func<CancellationToken, Task<int>>? embeddings = null) : IAsyncDisposable
 {
     WebApplication? app;
     readonly HttpClient backend = new(new SocketsHttpHandler { UseProxy = false, AutomaticDecompression = DecompressionMethods.None, PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30) }) { Timeout = Timeout.InfiniteTimeSpan };
@@ -67,6 +68,7 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         {
             var models = new List<object> { new { id = Policy.Model, @object = "model", owned_by = "llamacpp", meta = new { n_ctx = native?.CodingContext ?? Policy.Ctx128 } } };
             models.AddRange(config.Profiles.Select(p => (object)new { id = p.Key, @object = "model", owned_by = "llamacpp", meta = new { n_ctx = p.Value.ContextTokens } }));
+            if (embeddings is not null) models.Add(new { id = Policy.EmbeddingModel, @object = "model", owned_by = "llamacpp", meta = new { n_ctx = 2048 } });
             await Json(ctx, 200, System.Text.Json.JsonSerializer.Serialize(new { @object = "list", data = models }));
             return;
         }
@@ -90,6 +92,11 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
             }
             catch (System.Text.Json.JsonException) { /* the backend reports invalid input as before */ }
         }
+        if (embeddings is not null && HttpMethods.IsPost(ctx.Request.Method) && path is "/v1/embeddings" or "/embeddings")
+        {
+            await Embed(ctx, path, requestBody, requested, started, embeddings);
+            return;
+        }
         IDisposable lease;
         try { lease = await supervisor.AdmitRequest(profile, ctx.RequestAborted, background); }
         catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { return; }
@@ -102,7 +109,7 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         {
             for (int attempt = 1; ; attempt++)
             {
-                try { (outcome, timings) = await Forward(ctx, path, modelList, requestBody, profile is null); break; }
+                try { (outcome, timings) = await Forward(ctx, path, modelList, requestBody, profile is null, backendPort); break; }
                 catch (Exception ex) when (ex is HttpRequestException or IOException)
                 {
                     // Backend vanished (crash or external stop): refresh state so the next request reloads.
@@ -138,6 +145,45 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         }
     }
 
+    // Embeddings bypass admission: the engine is separate, small and CPU-only, so it never waits for or switches the
+    // chat model. A request that finds the engine dead before the first byte restarts it and is retried once.
+    async Task Embed(HttpContext ctx, string path, byte[]? requestBody, string? requested, long started, Func<CancellationToken, Task<int>> engine)
+    {
+        string outcome = "client gone";
+        bool retried = false;
+        try
+        {
+            for (int attempt = 1; ; attempt++)
+            {
+                int port;
+                try { port = await engine(ctx.RequestAborted); }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    log?.Invoke("Embedding engine could not start: " + ex.Message);
+                    outcome = "503";
+                    await Error(ctx, 503, "Local Qwen embedding engine could not start: " + ex.Message, "server_error");
+                    break;
+                }
+                try { (outcome, _) = await Forward(ctx, path, false, requestBody, false, port); break; }
+                catch (Exception ex) when (ex is HttpRequestException or IOException)
+                {
+                    log?.Invoke("Embedding request failed: " + ex.Message);
+                    if (ctx.Response.HasStarted) { ctx.Abort(); outcome = "aborted mid-reply"; break; }
+                    if (attempt == 1) { retried = true; ctx.Response.Clear(); continue; }
+                    outcome = "502";
+                    await Error(ctx, 502, "Local Qwen embedding engine is not reachable", "server_error");
+                    break;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { /* client went away */ }
+        finally
+        {
+            var total = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+            log?.Invoke(FormattableString.Invariant($"Request {ctx.Request.Method} {path} model {Token(requested)} profile embeddings -> {outcome}{(retried ? " after one engine restart" : "")}, total {total.TotalSeconds:0.0} s, client {Token(ctx.Request.Headers.UserAgent.ToString())}"));
+        }
+    }
+
     // Client-supplied names go into the log as one short token without spaces or control characters.
     static string Token(string? value)
     {
@@ -154,9 +200,9 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
     }
 
     // Returns the status sent to the client and llama-server's timing summary for the request log.
-    async Task<(string Status, string Timings)> Forward(HttpContext ctx, string path, bool cacheModels, byte[]? requestBody, bool applyDefaults)
+    async Task<(string Status, string Timings)> Forward(HttpContext ctx, string path, bool cacheModels, byte[]? requestBody, bool applyDefaults, int port)
     {
-        var target = $"http://127.0.0.1:{backendPort}{path}{ctx.Request.QueryString}";
+        var target = $"http://127.0.0.1:{port}{path}{ctx.Request.QueryString}";
         using var upstream = new HttpRequestMessage(new HttpMethod(ctx.Request.Method), target);
         bool chat = HttpMethods.IsPost(ctx.Request.Method) && path is "/v1/chat/completions" or "/chat/completions" or "/v1/responses";
         if (requestBody is not null)

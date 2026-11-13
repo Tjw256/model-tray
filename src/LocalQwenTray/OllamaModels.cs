@@ -8,10 +8,10 @@ internal static class OllamaModels
     public static string Repository { get; set; } = "orcarouter/Qwen3.8-27B-Uncensored";   // from config.json OllamaRepository
     public static string Root => Environment.GetEnvironmentVariable("OLLAMA_MODELS") is { Length: > 0 } custom
         ? custom : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ollama", "models");
-    public static ModelFiles? Find(string variant, string? root = null)
+    public static ModelFiles? Find(string variant, string? root = null, string? repository = null)
     {
         root ??= Root;
-        var manifest = Path.Combine([root, "manifests", "registry.ollama.ai", .. Repository.Split('/'), variant]);
+        var manifest = Path.Combine([root, "manifests", "registry.ollama.ai", .. (repository ?? Repository).Split('/'), variant]);
         if (!File.Exists(manifest)) return null;
         try
         {

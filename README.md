@@ -52,6 +52,7 @@ Ollama and plain llama.cpp ran at about the same speed. The gain comes from sett
 - **Context 128K, 192K or 256K.** 256K is the model's trained maximum. Context outranks the second slot: if VRAM is short, the order is 256K×2 → 256K×1 → 192K×2 → 192K×1 → 128K×2 …, and the panel shows what was loaded. Measured engine VRAM with vision: 25.0 GB at 128K, 26.7 GB at 192K, 28.5 GB at 256K (plus 0.8 GB for the second slot). It never spills into system RAM.
 - **Checks before and after loading.** Free VRAM is checked first. If even 64K doesn't fit, you get **one** notification, and requests wait while the tray checks free VRAM every 5 s; the model loads as soon as it fits. If VRAM is still short when the wait ends (default 5 min, setting *Wait for free VRAM*: 1/5/15/30 min), requests are refused at once with HTTP 503, silently and without load attempts, until VRAM fits again or you click Load now. After loading, the log is checked to confirm that all layers, the KV cache and the MTP draft are on the GPU.
 - **Recovers from an engine crash.** If `llama-server` dies before a request gets its first byte, the tray reloads the same model and retries that request once. If the retry also kills the engine, the client gets HTTP 502. A reply that had already started streaming is cut off as before.
+- **Embeddings.** `POST /v1/embeddings` (model name `nomic-embed-text`) goes to a second, small `llama-server` that reads Ollama's `nomic-embed-text` blob in place. It runs on the CPU, so it works while another program holds the GPU and never costs the chat model context. It starts with the first embedding request (about a second) and stops when the tray quits. Measured with 4 threads on a 12-core server: about 300 MB of RAM and 37 short texts per second. Inputs are limited to the model's trained 2,048 tokens: longer ones get HTTP 400 `exceed_context_size_error`, where Ollama truncated silently, so chunk long texts. Keep nomic's task prefixes (`search_query: `, `search_document: `) as with Ollama.
 - **Safe process ownership.** It only ever stops the `llama-server` it started, tracked by PID, start time and executable. Unknown programs on its ports are never killed.
 
 ### The tray
@@ -143,8 +144,9 @@ fingerprint semantics, key access and verification. The gateway remains loopback
 | `OllamaRepository` | Ollama model to load, e.g. `orcarouter/Qwen3.8-27B-Uncensored` (official library models are `library/<name>`). |
 | `ModelName` | Name advertised on `/v1/models`. |
 | `ClientSyncCommand` | Optional command run after a load whose context size changed. `{context}` is replaced with the token count. Use it to update your clients' context settings. |
+| `EmbeddingModel` | GGUF served on `/v1/embeddings`. Empty = Ollama's downloaded `nomic-embed-text:latest`. |
 
-Tray choices (context, model, reasoning, parallel requests, idle timeout) are saved in `settings.json` in the same folder. Logs are in the same folder: `tray.log` and `native-engine.log`. `tray.log` has one line per request: the requested model, profile, status, wait for the load, total time, prompt tokens processed and reused from the cache, and decode speed, so a client whose prompts keep missing the cache stands out. Request content is never logged.
+Tray choices (context, model, reasoning, parallel requests, idle timeout) are saved in `settings.json` in the same folder. Logs are in the same folder: `tray.log`, `native-engine.log` and `embedding-engine.log`. `tray.log` has one line per request: the requested model, profile, status, wait for the load, total time, prompt tokens processed and reused from the cache, and decode speed, so a client whose prompts keep missing the cache stands out. Request content is never logged.
 
 ## Customizing
 
