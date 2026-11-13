@@ -19,10 +19,11 @@ switching or loading anything. Loading an extraction profile does not change
 coding clients' synchronized context limits.
 
 Named profiles forward the request body unchanged, including `chat_template_kwargs`,
-reasoning fields, `max_tokens`, schemas and tools. The legacy route adds tray
-reasoning defaults only when the caller supplies no thinking controls. In particular,
-an explicit `chat_template_kwargs` object is never augmented. Turning thinking off
-for a retry needs no reload.
+reasoning fields, `max_tokens`, schemas and tools. The legacy route keeps its existing
+merge behavior: it adds the tray effort unless the caller sets `reasoning_effort`
+in kwargs or at the top level, and adds `preserve_thinking: false` unless the caller
+sets that kwarg. Existing client values and `max_tokens` are preserved. Turning
+thinking off for a named-profile retry needs no reload.
 
 The same idle timeout chosen in the tray applies to all profiles. Savannah's old
 standalone server had a separate 20-minute watchdog. It is not installed in Model

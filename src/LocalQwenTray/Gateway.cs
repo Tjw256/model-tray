@@ -153,8 +153,10 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         JsonNode? root;
         try { root = JsonNode.Parse(body); } catch (System.Text.Json.JsonException) { return body; }
         if (root is not JsonObject request) return body;
-        if (request.Any(p => p.Key == "chat_template_kwargs" || p.Key.StartsWith("reasoning", StringComparison.Ordinal) || p.Key.Contains("thinking", StringComparison.Ordinal))) return body;
-        request["chat_template_kwargs"] = new JsonObject { ["reasoning_effort"] = effort, ["preserve_thinking"] = false };
+        var kwargs = request["chat_template_kwargs"] as JsonObject;
+        if (kwargs is null) { if (request.ContainsKey("chat_template_kwargs")) return body; request["chat_template_kwargs"] = kwargs = new JsonObject(); }
+        if (!kwargs.ContainsKey("reasoning_effort") && !request.ContainsKey("reasoning_effort")) kwargs["reasoning_effort"] = effort;
+        if (!kwargs.ContainsKey("preserve_thinking")) kwargs["preserve_thinking"] = false;
         return Encoding.UTF8.GetBytes(request.ToJsonString());
     }
 

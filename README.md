@@ -122,8 +122,8 @@ Named request profiles are supported in addition to the tray's default model.
 one slot, f16 target/draft KV, MTP5 and the embedded chat template. A switch waits
 for all active replies to finish. Unknown names still select the tray default.
 Named profiles never reduce their context or slots to fit VRAM, and their request
-bodies pass through unchanged. Explicit thinking controls also bypass tray defaults
-on the legacy route.
+bodies pass through unchanged. The legacy route keeps its existing merge of tray
+reasoning defaults with client controls.
 
 Authenticated `GET /v1/status`, `GET /v1/profiles` and
 `GET /v1/profiles/savannah-extraction/fingerprint` do not load a model.

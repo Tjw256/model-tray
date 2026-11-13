@@ -21,8 +21,9 @@ internal static class GatewayTests
         SelfTests.Check("client's own reasoning effort is never overridden", J("{\"chat_template_kwargs\":{\"reasoning_effort\":\"xhigh\"}}").Contains("\"reasoning_effort\":\"xhigh\"") && !J("{\"reasoning_effort\":\"medium\"}").Contains("\"low\""));
         SelfTests.Check("client's own preserve_thinking and enable_thinking kept", J("{\"chat_template_kwargs\":{\"preserve_thinking\":true,\"enable_thinking\":false}}").Contains("\"preserve_thinking\":true") && J("{\"chat_template_kwargs\":{\"enable_thinking\":false}}").Contains("\"enable_thinking\":false"));
         SelfTests.Check("non-JSON or non-object bodies pass through untouched", J("not json") == "not json" && J("[1,2]") == "[1,2]");
-        const string explicitThinking = "{ \"reasoning_format\": \"deepseek\", \"max_tokens\": 19, \"chat_template_kwargs\": {\"enable_thinking\": true} }";
-        SelfTests.Check("explicit legacy thinking controls also pass through byte-for-byte", J(explicitThinking) == explicitThinking);
+        SelfTests.Check("legacy top-level effort still receives preserve_thinking=false", J("{\"reasoning_effort\":\"high\"}") == "{\"reasoning_effort\":\"high\",\"chat_template_kwargs\":{\"preserve_thinking\":false}}");
+        SelfTests.Check("legacy enable_thinking-only kwargs retain tray effort and history defaults", J("{\"chat_template_kwargs\":{\"enable_thinking\":true}}") == "{\"chat_template_kwargs\":{\"enable_thinking\":true,\"reasoning_effort\":\"low\",\"preserve_thinking\":false}}");
+        SelfTests.Check("legacy reasoning_format alone retains tray defaults and max_tokens", J("{\"reasoning_format\":\"deepseek\",\"max_tokens\":19}") == "{\"reasoning_format\":\"deepseek\",\"max_tokens\":19,\"chat_template_kwargs\":{\"reasoning_effort\":\"low\",\"preserve_thinking\":false}}");
         var fake = WebApplication.CreateSlimBuilder();
         fake.Logging.ClearProviders();
         fake.WebHost.ConfigureKestrel(o => o.Listen(IPAddress.Loopback, backendPort));
