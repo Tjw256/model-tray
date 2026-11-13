@@ -126,6 +126,7 @@ internal static class SelfTests
             VramShortage().GetAwaiter().GetResult();
             BoundaryTests.Run().GetAwaiter().GetResult();
             GatewayTests.Run().GetAwaiter().GetResult();
+            ProfileTests.Run().GetAwaiter().GetResult();
             McpTests.Run().GetAwaiter().GetResult();
             Check("tray launch only listens; it does not load the model", !UiSpec.StartsModelOnLaunch);
             Check("quitting the tray unloads the model it serves", UiSpec.StopsModelOnExit);
