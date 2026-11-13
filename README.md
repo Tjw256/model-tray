@@ -115,6 +115,23 @@ Register it with your agent (use the full path to your published exe). The first
 
 Then tell the agent when to use it, for example: *"Use ask_local_qwen for first drafts and summaries. Hand small, well-defined code chores to run_local_qwen_agent with a check_command, then review its diff."*
 
+## Clients that repeat long instructions
+
+An app that sends the same long instructions with every call, then a different text, decides by its message layout whether those instructions are processed once or every time.
+
+Qwen3.8 mixes attention with recurrent layers, so llama-server cannot roll its state back to an arbitrary token. It returns to a *context checkpoint*, and it makes one at the start of the last user message. So:
+
+- **Instructions in the system message, the changing text alone in the user message:** each call restores the checkpoint and processes only the new text.
+- **Instructions and text in one user message:** every call processes everything again, because no checkpoint sits between them.
+
+Measured with `bench/engine_bench.py` on llama.cpp b11517 and b12360 with the tray's flags (a 0.8B model of the same architecture on a CPU, which shows the token counts but not the 5090's timings): with 4,145 tokens of instructions and about 790 tokens of text per call, the first layout processed about 790 tokens per call and reused 4,145; the second processed all 4,930 every time.
+
+Three more things follow from the same mechanism:
+
+- Keep the instructions byte-identical between calls. A timestamp or a counter near the top moves the point where the prompts differ to before the checkpoint.
+- Retrying a call with thinking switched off reuses the whole prompt (6 tokens were processed), since the switch only changes the last few tokens.
+- Another app's request in between does not cost the first app its instructions. With two slots it lands on the other slot. With one slot, llama-server parks the replaced state in its host prompt cache (`--cache-ram`) and brings it back when the first app calls again.
+
 ## Configuration
 
 `%LOCALAPPDATA%\LocalQwen\config.json` (open it with **Open config folder**; see `config.example.json`):
@@ -146,13 +163,15 @@ Pull requests are welcome.
 - **Crashes with "CUDA error: an illegal memory access" during long generations** can be the GPU, not llama.cpp. Check the Windows **System** log for `nvlddmkm` events. On the development machine they were caused by an undervolt curve that boosted to an unstable clock whenever the load dipped. Capping the curve fixed it, with no speed loss.
 - **Where the time goes at long context.** At 84K tokens of conversation, answers still ran at 125–140 tok/s, but thinking dropped to 67–88. Lowering the reasoning effort helped more than compacting earlier: going from 16K to 84K costs only about 15–20%. Draft depth 5 stayed best; 2 and 3 were slower overall. An 8-bit KV cache gave no gain for +1.5 GB, and on an RTX 5090 Q4_K_M was *slower* than Q5_K_M — and Q6_K 30–40% slower.
 - **Tried and rejected (all lossless, all slower here):** the DFlash2 draft model (z-lab) was 14% slower than MTP + n-gram on the abliterated model and 4% slower on the original. Draft depths 4/6/7 and shorter n-gram matches were within noise or worse. The original (non-abliterated) Qwen3.8 27B was not faster, and Q6_K was 30–40% slower.
-- **Prompt re-processing on hybrid models.** Qwen3.8 mixes attention and recurrent layers. Appending to a conversation is cheap, because only the new tokens are processed, but editing earlier history forces a full re-read.
+- **Prompt re-processing on hybrid models.** Qwen3.8 mixes attention and recurrent layers. Appending to a conversation is cheap, because only the new tokens are processed. A prompt that differs earlier is re-read from the nearest context checkpoint before the difference, or from the start if there is none. See [Clients that repeat long instructions](#clients-that-repeat-long-instructions).
 
 ## Tests
 
 `python verify_all.py` (in `src/LocalQwenTray`) builds the app and runs the self-tests. These cover the VRAM policy, launch arguments, process ownership, a real Kestrel gateway against a fake llama-server (auth, on-demand load, live streaming, idle unload, load failures) and real WinForms UI tests. It then publishes and checks the published exe. None of the tests use the GPU.
 
 `LocalQwenTray.exe --ui-preview <folder>` renders the status panel and icons to PNG files.
+
+`python bench/engine_bench.py` measures one llama-server configuration: load time, generation and prefill speed, prompt reuse, and throughput with requests in parallel. It starts its own llama-server on a spare port and stops it afterwards, so it needs the GPU free but never touches the tray's engine. Run it once per llama.cpp build or flag set with `--json` and compare the receipts. `--help` lists the scenarios.
 
 ## License
 
