@@ -91,6 +91,20 @@ internal static class ProfileTests
             SelfTests.Check("fingerprint endpoint returns the profile digest without loading", fingerprint.RootElement.GetProperty("sha256").GetString() == await Digest(native.LogPath) && apiHost.UpCalls == 0);
             using var missing = await api.GetAsync("/v1/profiles/missing/fingerprint");
             SelfTests.Check("unknown fingerprint returns 404 without loading", missing.StatusCode == System.Net.HttpStatusCode.NotFound && apiHost.UpCalls == 0);
+            var pinnedDir = Path.Combine(dir, "pinned");
+            Directory.CreateDirectory(pinnedDir);
+            var pinned = Path.Combine(pinnedDir, "llama-server.exe");
+            await File.WriteAllTextAsync(pinned, "synthetic pinned build");
+            var trayBuild = await Digest(native.LogPath);
+            profile.LlamaServer = pinned;
+            native.SelectedProfile = "savannah-extraction";
+            bool profileEngine = native.Executable == Path.GetFullPath(pinned);
+            native.SelectedProfile = null;
+            SelfTests.Check("a profile's own llama-server is launched for it; the default keeps the tray's", profileEngine && native.Executable == Path.GetFullPath(exe));
+            using var pinnedPrint = JsonDocument.Parse(await api.GetStringAsync("/v1/profiles/savannah-extraction/fingerprint"));
+            SelfTests.Check("the fingerprint hashes the profile's pinned build", pinnedPrint.RootElement.GetProperty("sha256").GetString() is { } pinnedDigest && pinnedDigest != trayBuild
+                && pinnedDigest == JsonSerializer.SerializeToElement(await ProfileFingerprint.Read("savannah-extraction", profile, pinned, native.LogPath, default)).GetProperty("sha256").GetString());
+            profile.LlamaServer = null;
             var args = ModelProfile.Savannah().BuildArguments("savannah-extraction", "engine.log");
             string Value(string flag) => args[Array.IndexOf(args, flag) + 1];
             SelfTests.Check("Savannah matches 32K, one slot, f16 target/draft KV and MTP5", Value("-c") == "32768" && Value("-np") == "1" && Value("-ctk") == "f16" && Value("-ctv") == "f16" && Value("--spec-draft-type-k") == "f16" && Value("--spec-draft-type-v") == "f16" && Value("--spec-type") == "draft-mtp" && Value("--spec-draft-n-max") == "5" && !args.Contains("--ctx-checkpoints") && !args.Contains("--cache-ram") && !args.Contains("--chat-template-file"));

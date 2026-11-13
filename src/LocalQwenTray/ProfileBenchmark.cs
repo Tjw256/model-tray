@@ -73,7 +73,8 @@ internal static class ProfileBenchmark
         // command, with only host, port, alias and log destination changed.
         string[] directArgs = ["-m", profile.ModelFile, "-ngl", "999", "--fit", "off", "--load-mode", "none", "-c", "32768", "-np", "1", "-t", "4", "-tb", "4", "-b", "512", "-ub", "512", "-fa", "on", "-ctk", "f16", "-ctv", "f16", "--spec-type", "draft-mtp", "--spec-draft-sampling", "probabilistic", "--no-host", "--spec-draft-n-max", "5", "--spec-draft-ngl", "999", "--spec-draft-threads", "4", "--spec-draft-threads-batch", "4", "--spec-draft-type-k", "f16", "--spec-draft-type-v", "f16", "-lv", "4", "--override-tensor", "token_embd.weight=CUDA0", "--host", "127.0.0.1", "--port", Policy.BackendPort.ToString(), "--alias", "savannah-extraction", "--jinja", "--reasoning-format", "deepseek", "--slots", "--log-colors", "off", "--log-file", Path.Combine(output,"direct.log")];
         await File.WriteAllTextAsync(Path.Combine(output,"direct-arguments.json"),JsonSerializer.Serialize(directArgs),ct);
-        var start = new ProcessStartInfo(config.LlamaServer) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Path.GetDirectoryName(config.LlamaServer)! };
+        var engine = profile.Engine(config);
+        var start = new ProcessStartInfo(engine) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Path.GetDirectoryName(engine)! };
         NativeHost.ConfigureEnvironment(start, config.ApiKey);
         foreach (var arg in directArgs) start.ArgumentList.Add(arg);
         JsonElement direct;

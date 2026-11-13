@@ -12,6 +12,10 @@ internal sealed class ModelProfile
     public int Slots { get; set; } = 1;
     public int RequiredFreeMiB { get; set; } = 25000;
     public string[] Arguments { get; set; } = [];
+    // Optional llama-server.exe for this profile; empty uses the tray's. Lets a benchmarked
+    // profile stay on its build while the default engine is upgraded.
+    public string? LlamaServer { get; set; }
+    public string Engine(AppConfig config) => Path.GetFullPath(string.IsNullOrWhiteSpace(LlamaServer) ? config.LlamaServer : LlamaServer);
 
     public static ModelProfile Savannah() => new()
     {
