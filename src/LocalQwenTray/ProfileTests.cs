@@ -23,6 +23,49 @@ internal static class ProfileTests
         using (await extraction.WaitAsync(TimeSpan.FromSeconds(3)))
             SelfTests.Check("cancelled switch never selects a profile", selected.SequenceEqual(new string?[] { null, null, "savannah-extraction" }));
 
+        // Background priority: a fake clock and a pause the test releases by hand.
+        var clockNow = DateTimeOffset.UnixEpoch;
+        var pauses = new List<TimeSpan>();
+        var paused = new SemaphoreSlim(0);
+        TaskCompletionSource resume = new();
+        Task Pause(TimeSpan d, CancellationToken ct) { pauses.Add(d); resume = new(TaskCreationOptions.RunContinuationsAsynchronously); paused.Release(); return resume.Task.WaitAsync(ct); }
+        var order = new List<string?>();
+        var shared = new ProfileAdmission((p, _) => { lock (order) order.Add(p); return Task.CompletedTask; }, () => clockNow, Pause);
+        var chat = await shared.Enter(null, default);
+        var batch = shared.Enter("savannah-extraction", default, background: true);
+        SelfTests.Check("background waits while an interactive request runs", !batch.IsCompleted);
+        chat.Dispose();
+        await paused.WaitAsync(TimeSpan.FromSeconds(3));
+        SelfTests.Check("background waits a quiet minute after interactive work ends", !batch.IsCompleted && pauses.SequenceEqual([ProfileAdmission.Quiet]));
+        clockNow += TimeSpan.FromSeconds(30);
+        (await shared.Enter(null, default)).Dispose();
+        clockNow += TimeSpan.FromSeconds(30);
+        resume.SetResult();
+        await paused.WaitAsync(TimeSpan.FromSeconds(3));
+        SelfTests.Check("interactive work during the quiet minute restarts it", !batch.IsCompleted && pauses[^1] == TimeSpan.FromSeconds(30));
+        clockNow += TimeSpan.FromSeconds(30);
+        resume.SetResult();
+        var batchLease = await batch.WaitAsync(TimeSpan.FromSeconds(3));
+        SelfTests.Check("background enters after a full quiet minute", order.SequenceEqual(new string?[] { null, null, "savannah-extraction" }));
+        var chatDuringBatch = shared.Enter(null, default);
+        var nextBatch = shared.Enter("savannah-extraction", default, background: true);
+        SelfTests.Check("interactive request waits for the running background request", !chatDuringBatch.IsCompleted && !nextBatch.IsCompleted);
+        batchLease.Dispose();
+        using (await chatDuringBatch.WaitAsync(TimeSpan.FromSeconds(3)))
+            SelfTests.Check("a waiting interactive request goes before the next background one", !nextBatch.IsCompleted && order[^1] is null);
+        await paused.WaitAsync(TimeSpan.FromSeconds(3));
+        clockNow += ProfileAdmission.Quiet;
+        resume.SetResult();
+        (await nextBatch.WaitAsync(TimeSpan.FromSeconds(3))).Dispose();
+        using var cancelBatch = new CancellationTokenSource();
+        var heldChat = await shared.Enter(null, default);
+        var abandoned = shared.Enter("savannah-extraction", cancelBatch.Token, background: true);
+        cancelBatch.Cancel();
+        try { await abandoned.WaitAsync(TimeSpan.FromSeconds(3)); throw new Exception("Waiting background request did not cancel"); }
+        catch (OperationCanceledException) { }
+        heldChat.Dispose();
+        SelfTests.Check("a cancelled background request never switches the profile", order.Count(p => p is not null) == 2);
+
         // Reproduce the old idle-save race with an explicit barrier, not a sleep.
         var saveStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseSave = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

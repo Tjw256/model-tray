@@ -120,7 +120,9 @@ Then tell the agent when to use it, for example: *"Use ask_local_qwen for first 
 Named request profiles are supported in addition to the tray's default model.
 `model: "savannah-extraction"` selects the existing Q6_K blob with 32K context,
 one slot, f16 target/draft KV, MTP5 and the embedded chat template. A switch waits
-for all active replies to finish. Unknown names still select the tray default.
+for all active replies to finish. The extraction profile runs in the background:
+chat clients go first, and the batch resumes after a quiet minute.
+Unknown names still select the tray default.
 Named profiles never reduce their context or slots to fit VRAM, and their request
 bodies pass through unchanged. The legacy route keeps its existing merge of tray
 reasoning defaults with client controls.

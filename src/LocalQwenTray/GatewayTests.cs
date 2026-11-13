@@ -121,7 +121,9 @@ internal static class GatewayTests
         }
         var profileHost = new TestHost();
         var profiles = new AppConfig();
-        var profileSupervisor = new Supervisor(new Controller(profileHost), host: profileHost);
+        // Waits skip ahead on a shifted clock, so the background quiet minute passes instantly but is still recorded.
+        var skipped = TimeSpan.Zero;
+        var profileSupervisor = new Supervisor(new Controller(profileHost), clock: () => DateTimeOffset.Now + skipped, host: profileHost, delay: (d, _) => { skipped += d; return Task.CompletedTask; });
         int profilePort = FreePort();
         await using var profileGateway = new Gateway(profileSupervisor, key, profilePort, backendPort, dir, reasoning: () => "low", config: profiles);
         await profileGateway.StartAsync();
@@ -142,6 +144,7 @@ internal static class GatewayTests
             using var result = await pending;
             SelfTests.Check("switch drains SSE then loads extraction once", completed.Contains("[DONE]") && result.IsSuccessStatusCode && profileHost.StopCalls == 1 && profileHost.UpCalls == 2 && profileHost.SelectedProfile == "savannah-extraction");
             SelfTests.Check("thinking controls and max_tokens pass through byte-for-byte", backendBody == json);
+            SelfTests.Check("background extraction waited a quiet minute after the chat stream", skipped > ProfileAdmission.Quiet - TimeSpan.FromSeconds(1));
         }
         const string retry = "{\"model\":\"savannah-extraction\",\"chat_template_kwargs\":{\"enable_thinking\":false},\"max_tokens\":256}";
         using (var result = await profileClient.SendAsync(Req(HttpMethod.Post, "/v1/chat/completions", retry)))

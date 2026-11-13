@@ -12,6 +12,22 @@ unloading a different profile. Requests arriving after a pending switch wait beh
 it. Requests on the same profile can overlap, subject to that profile's slot count.
 A disconnected waiting caller does not cancel other callers or active generations.
 
+## Sharing the card with interactive clients
+
+A profile with `"Background": true` (the built-in `savannah-extraction` has it) yields
+the card to everything else. Its requests are admitted only when no other request is
+waiting or running and the others have been quiet for 60 seconds. A background
+request that is already running finishes first; nothing is interrupted. So during a
+batch, a chat request waits for the current extraction call, then the tray switches
+to the default model. The batch resumes a minute after the last chat reply.
+
+Background callers should therefore expect a request to be held for minutes while
+someone is chatting. `in_flight` in `/v1/status` counts held requests, and
+`GET /v1/profiles` shows `background` per profile. A held request is not lost if
+the caller keeps the connection open; a disconnected one never triggers a switch.
+A `config.json` saved before this field existed keeps its old profile entry: add
+`"Background": true` to its `savannah-extraction` entry by hand.
+
 All other model names select the existing tray model and its adaptive VRAM policy.
 The tray's context, quant, reasoning and slot choices continue to apply there. Model
 listing always includes that stable model ID and configured profiles, without
@@ -53,7 +69,13 @@ private backend port, API key, alias and log destination. It does not start Olla
 
 Add entries to `Profiles` in the private `config.json`, then restart the tray.
 Each entry has `ModelFile`, optional `Projector` and `ChatTemplate`, `ContextTokens`,
-`Slots`, `RequiredFreeMiB` and an `Arguments` string array. Paths should be absolute.
+`Slots`, `RequiredFreeMiB`, an `Arguments` string array, optional `Background`
+(see above) and optional `LlamaServer`. Paths should be absolute.
+
+`LlamaServer` pins the profile to its own llama.cpp build; empty uses the tray's.
+Use it to keep a benchmarked profile on its build while the default engine is
+upgraded. The fingerprint hashes the profile's build, and a running engine is
+adopted after a tray restart only if it was launched from that profile's build.
 `Arguments` specifies model-specific KV, speculation, placement, batching and template
 options. `ModelProfile.Savannah()` in `Profiles.cs` is the complete extraction preset.
 
@@ -154,7 +176,7 @@ After the GPU reservation has been released, and only with exclusive test access
 dotnet bin/Release/net10.0-windows/LocalQwenTray.dll --verify-profile <new-empty-output-folder>
 ```
 
-This explicit mode uses the installed config's binary and key, checks compute
+This explicit mode uses the profile's binary and the installed config's key, checks compute
 processes and backend-port availability before each load, then runs an independent
 direct baseline and the gateway profile sequentially. It compares generated token
 IDs for a fixed synthetic prompt at temperature 0, seed 42, with prompt reuse off.

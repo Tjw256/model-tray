@@ -23,6 +23,9 @@ internal static class Policy
     // (owner decision 2026-10-10: retries used to notify on every client request).
     public const int DefaultVramWaitMinutes = 5, VramPollSeconds = 5;
     public static readonly int[] VramWaitChoices = [1, 5, 15, 30];
+    // Background profiles (Savannah's batch) take the card only after interactive clients have been quiet this long
+    // (owner decision 2026-11-13: interactive wins; the batch resumes after about a minute).
+    public const int BackgroundQuietSeconds = 60;
     // 256K is the model's trained context (n_ctx_train 262144); going beyond needs YaRN and degrades recall.
     public const int Ctx64 = 65536, Ctx96 = 98304, Ctx128 = 131072, Ctx192 = 196608, Ctx256 = 262144;
     public static readonly int[] ContextChoices = [Ctx128, Ctx192, Ctx256];

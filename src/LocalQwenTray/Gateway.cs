@@ -51,7 +51,7 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         }
         if (HttpMethods.IsGet(ctx.Request.Method) && path == "/v1/profiles")
         {
-            await Json(ctx, 200, System.Text.Json.JsonSerializer.Serialize(new { profiles = config?.Profiles.Select(p => new { name = p.Key, context_tokens = p.Value.ContextTokens, slots = p.Value.Slots, fingerprint_url = "/v1/profiles/" + p.Key + "/fingerprint" }) }));
+            await Json(ctx, 200, System.Text.Json.JsonSerializer.Serialize(new { profiles = config?.Profiles.Select(p => new { name = p.Key, context_tokens = p.Value.ContextTokens, slots = p.Value.Slots, background = p.Value.Background, fingerprint_url = "/v1/profiles/" + p.Key + "/fingerprint" }) }));
             return;
         }
         if (HttpMethods.IsGet(ctx.Request.Method) && path.StartsWith("/v1/profiles/") && path.EndsWith("/fingerprint"))
@@ -73,6 +73,7 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         if (modelList && !supervisor.IsReady) { await Json(ctx, 200, CachedModels()); return; } // listing never wakes the GPU
         byte[]? requestBody = null;
         string? profile = null;
+        bool background = false;
         if (ctx.Request.ContentLength > 0 || ctx.Request.Headers.TransferEncoding.Count > 0)
         {
             using var buffer = new MemoryStream();
@@ -80,12 +81,12 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
             requestBody = buffer.ToArray();
             try
             {
-                if (JsonNode.Parse(requestBody) is JsonObject json && json["model"] is JsonValue model && model.TryGetValue<string>(out var name) && config?.Profiles.ContainsKey(name) == true) profile = name;
+                if (JsonNode.Parse(requestBody) is JsonObject json && json["model"] is JsonValue model && model.TryGetValue<string>(out var name) && config?.Profiles.TryGetValue(name, out var named) == true) (profile, background) = (name, named.Background);
             }
             catch (System.Text.Json.JsonException) { /* the backend reports invalid input as before */ }
         }
         IDisposable lease;
-        try { lease = await supervisor.AdmitRequest(profile, ctx.RequestAborted); }
+        try { lease = await supervisor.AdmitRequest(profile, ctx.RequestAborted, background); }
         catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { return; }
         catch (Exception ex) { log?.Invoke("On-demand load failed: " + ex.Message); await Error(ctx, 503, "Local Qwen could not load: " + ex.Message, "server_error"); return; }
         using (lease)

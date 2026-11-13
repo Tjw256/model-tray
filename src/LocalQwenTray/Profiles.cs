@@ -15,10 +15,13 @@ internal sealed class ModelProfile
     // Optional llama-server.exe for this profile; empty uses the tray's. Lets a benchmarked
     // profile stay on its build while the default engine is upgraded.
     public string? LlamaServer { get; set; }
+    // A background profile yields the card: see ProfileAdmission.
+    public bool Background { get; set; }
     public string Engine(AppConfig config) => Path.GetFullPath(string.IsNullOrWhiteSpace(LlamaServer) ? config.LlamaServer : LlamaServer);
 
     public static ModelProfile Savannah() => new()
     {
+        Background = true,
         ModelFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ollama", "models", "blobs", "sha256-1a0d6fe2e48417f1571a57a7104b4d5da0c45c3d00de18fa7aa48affca5a24d7"),
         Arguments = ["-ngl", "999", "--load-mode", "none", "-t", "4", "-tb", "4", "-b", "512", "-ub", "512", "-fa", "on", "-ctk", "f16", "-ctv", "f16", "--spec-type", "draft-mtp", "--spec-draft-sampling", "probabilistic", "--no-host", "--spec-draft-n-max", "5", "--spec-draft-ngl", "999", "--spec-draft-threads", "4", "--spec-draft-threads-batch", "4", "--spec-draft-type-k", "f16", "--spec-draft-type-v", "f16", "-lv", "4", "--override-tensor", "token_embd.weight=CUDA0", "--reasoning-format", "deepseek", "--slots"]
     };
@@ -49,40 +52,88 @@ internal sealed class ModelProfile
 // A writer turnstile prevents a stream of old-profile requests from starving a
 // pending switch. Same-profile requests still run concurrently. Cancellation
 // removes a waiting request without interrupting any active stream.
-internal sealed class ProfileAdmission(Func<string?, CancellationToken, Task> select)
+// Background requests enter only when no interactive request is waiting or running
+// and the interactive side has been quiet for Quiet; a running background request
+// is never interrupted. Interactive requests count as waiting from arrival, so a
+// background request cannot take the turn ahead of one.
+internal sealed class ProfileAdmission(Func<string?, CancellationToken, Task> select, Func<DateTimeOffset>? clock = null, Func<TimeSpan, CancellationToken, Task>? delay = null)
 {
+    public static readonly TimeSpan Quiet = TimeSpan.FromSeconds(Policy.BackgroundQuietSeconds);
     readonly SemaphoreSlim turn = new(1, 1);
     readonly object sync = new();
-    TaskCompletionSource drained = Completed();
+    readonly Func<DateTimeOffset> now = clock ?? (() => DateTimeOffset.Now);
+    readonly Func<TimeSpan, CancellationToken, Task> pause = delay ?? Task.Delay;
+    TaskCompletionSource drained = Completed(), interactiveDone = Completed();
     string? current;
-    int active;
+    int active, interactive;
+    DateTimeOffset quietSince = DateTimeOffset.MinValue;
     static TaskCompletionSource Completed() { var t = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); t.SetResult(); return t; }
 
-    public async Task<IDisposable> Enter(string? profile, CancellationToken ct)
+    public async Task<IDisposable> Enter(string? profile, CancellationToken ct, bool background = false)
     {
-        await turn.WaitAsync(ct);
+        if (!background) lock (sync) { if (interactive++ == 0) interactiveDone = new(TaskCreationOptions.RunContinuationsAsynchronously); }
+        bool admitted = false;
         try
         {
-            Task wait;
-            lock (sync) wait = current == profile ? Task.CompletedTask : drained.Task;
-            await wait.WaitAsync(ct);
-            await select(profile, ct);
+            while (true)
+            {
+                if (background) await WaitForQuiet(ct);
+                await turn.WaitAsync(ct);
+                try
+                {
+                    // An interactive request may have arrived between the quiet check and the turn.
+                    if (background && !IsQuiet()) continue;
+                    Task wait;
+                    lock (sync) wait = current == profile ? Task.CompletedTask : drained.Task;
+                    await wait.WaitAsync(ct);
+                    await select(profile, ct);
+                    lock (sync)
+                    {
+                        current = profile;
+                        if (active++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                    }
+                    admitted = true;
+                    return new Lease(this, !background);
+                }
+                finally { turn.Release(); }
+            }
+        }
+        finally { if (!background && !admitted) EndInteractive(); }
+    }
+    bool IsQuiet() { lock (sync) return interactive == 0 && now() - quietSince >= Quiet; }
+    async Task WaitForQuiet(CancellationToken ct)
+    {
+        while (true)
+        {
+            Task? busy = null;
+            TimeSpan left;
             lock (sync)
             {
-                current = profile;
-                if (active++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (interactive > 0) busy = interactiveDone.Task;
+                left = quietSince + Quiet - now();
             }
-            return new Lease(this);
+            if (busy is not null) await busy.WaitAsync(ct);
+            else if (left > TimeSpan.Zero) await pause(left, ct);
+            else return;
         }
-        finally { turn.Release(); }
     }
-    sealed class Lease(ProfileAdmission owner) : IDisposable
+    void EndInteractive()
+    {
+        lock (sync)
+        {
+            if (--interactive > 0) return;
+            quietSince = now();
+            interactiveDone.TrySetResult();
+        }
+    }
+    sealed class Lease(ProfileAdmission owner, bool interactive) : IDisposable
     {
         int disposed;
         public void Dispose()
         {
             if (Interlocked.Exchange(ref disposed, 1) != 0) return;
             lock (owner.sync) { if (--owner.active == 0) owner.drained.TrySetResult(); }
+            if (interactive) owner.EndInteractive();
         }
     }
 }
