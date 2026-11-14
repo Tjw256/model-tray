@@ -18,6 +18,9 @@ internal sealed class AppConfig
     // Optional command run after a load whose context differs from the last one; "{context}" is replaced
     // by the allocated token count. Use it to update your clients' context settings.
     public string[]? ClientSyncCommand { get; set; }
+    // GGUF served on /v1/embeddings; empty = Ollama's downloaded nomic-embed-text:latest blob.
+    public string EmbeddingModel { get; set; } = "";
+    public Dictionary<string, ModelProfile> Profiles { get; set; } = new() { ["savannah-extraction"] = ModelProfile.Savannah() };
 
     static readonly JsonSerializerOptions Pretty = new() { WriteIndented = true };
     public static string DefaultDirectory => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LocalQwen");
@@ -32,6 +35,7 @@ internal sealed class AppConfig
             var loaded = JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(path)) ?? throw new InvalidOperationException("config.json is empty");
             if (string.IsNullOrWhiteSpace(loaded.ApiKey)) throw new InvalidOperationException($"config.json has no ApiKey: {path}");
             if (string.IsNullOrWhiteSpace(loaded.LlamaServer)) loaded.LlamaServer = DefaultServer(appDirectory);
+            if (loaded.Profiles is null || loaded.Profiles.Values.Any(p => p is null)) throw new InvalidOperationException("config.json Profiles must be an object of model profiles");
             return loaded;
         }
         var created = new AppConfig

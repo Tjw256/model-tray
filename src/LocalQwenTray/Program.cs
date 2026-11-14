@@ -27,6 +27,7 @@ internal static class Program
             mode = Entry.Mode(args);
             if (mode == "--write-icon") { TrayIcons.WriteIco(args[Array.IndexOf(args, "--write-icon") + 1]); return 0; }
             if (mode == "--ui-preview") return UiSmokeTests.Preview(args[Array.IndexOf(args, "--ui-preview") + 1]);
+            if (mode == "--verify-profile") return ProfileBenchmark.Run(args[Array.IndexOf(args, "--verify-profile") + 1]).GetAwaiter().GetResult();
             if (mode == "--self-test") return SelfTests.Run();
             if (mode == "--process-test") return RuntimeTests.Run().GetAwaiter().GetResult();
             if (mode == "--ui-smoke-test") return UiSmokeTests.Run();
@@ -54,6 +55,8 @@ internal static class Program
             }
             using var http = new HttpClient(new HttpClientHandler { UseProxy = false }) { Timeout = Timeout.InfiniteTimeSpan };
             var host = new NativeHost(config, new ProcessRunner(), http) { ContextLoaded = context => OpenCodeClient.UpdateContext(context) };
+            foreach (var (name, profile) in config.Profiles) profile.Validate(name);
+            host.SelectedProfile = host.OwnedProfile;
             var controller = new Controller(host);
             if (mode != "tray")
             {
@@ -88,10 +91,11 @@ internal static class Program
             MigrateLegacyEngine(host, controller, log);
             Gateway? gateway = null;
             var gatewayLog = log;
+            var embedding = new EmbeddingEngine(config, http, stateDirectory);
             async Task<string?> EnsureGateway()
             {
                 if (gateway is not null) return null;
-                var candidate = new Gateway(supervisor, key, Policy.PublicPort, Policy.BackendPort, stateDirectory, gatewayLog.Write, () => settings.ReasoningOrDefault);
+                var candidate = new Gateway(supervisor, key, Policy.PublicPort, Policy.BackendPort, stateDirectory, gatewayLog.Write, () => settings.ReasoningOrDefault, config, host, embedding.EnsureReady);
                 try { await candidate.StartAsync(); gateway = candidate; gatewayLog.Write($"Listening on http://127.0.0.1:{Policy.PublicPort}/v1 (model loads on demand)"); return null; }
                 catch (Exception ex)
                 {
@@ -102,6 +106,8 @@ internal static class Program
             using var context = new TrayContext(supervisor, host, log, settings, stateDirectory, EnsureGateway, apiKey: key);
             Application.Run(context);
             gateway?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            try { using var stopping = new CancellationTokenSource(TimeSpan.FromSeconds(10)); embedding.Stop(stopping.Token).GetAwaiter().GetResult(); }
+            catch (Exception ex) { log.Write("Embedding engine stop failed: " + ex.Message); }
             return 0;
         }
         catch (Exception ex)

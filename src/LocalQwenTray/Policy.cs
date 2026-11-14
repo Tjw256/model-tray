@@ -16,13 +16,17 @@ internal static class Policy
     public static string Model { get; set; } = "qwen3.8-27b-uncensored-q5_k_m";   // from config.json ModelName
     // Clients always talk to the tray's gateway on PublicPort; llama-server is private on BackendPort and is
     // loaded on the first request, then unloaded after the idle timeout (owner decision 2026-10-08).
-    public const int PublicPort = 8000, BackendPort = 18081;
+    public const int PublicPort = 8000, BackendPort = 18081, EmbeddingPort = 18082;
+    public const string EmbeddingModel = "nomic-embed-text";   // name advertised for /v1/embeddings
     public const int DefaultIdleMinutes = 5;
     public static readonly int?[] IdleChoices = [1, 5, 15, 30, 60, null];
     // After a load fails for lack of VRAM: one notification, then requests wait this long while free VRAM is polled
     // (owner decision 2026-10-10: retries used to notify on every client request).
     public const int DefaultVramWaitMinutes = 5, VramPollSeconds = 5;
     public static readonly int[] VramWaitChoices = [1, 5, 15, 30];
+    // Background profiles (Savannah's batch) take the card only after interactive clients have been quiet this long
+    // (owner decision 2026-11-13: interactive wins; the batch resumes after about a minute).
+    public const int BackgroundQuietSeconds = 60;
     // 256K is the model's trained context (n_ctx_train 262144); going beyond needs YaRN and degrades recall.
     public const int Ctx64 = 65536, Ctx96 = 98304, Ctx128 = 131072, Ctx192 = 196608, Ctx256 = 262144;
     public static readonly int[] ContextChoices = [Ctx128, Ctx192, Ctx256];
