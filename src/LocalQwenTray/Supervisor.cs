@@ -38,8 +38,48 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
     readonly CancellationTokenSource lifetime = new();
     readonly Func<TimeSpan, CancellationToken, Task> pause = delay ?? Task.Delay;
     Task? load;
+    ProfileAdmission? admission;
+    readonly SemaphoreSlim lifecycle = new(1, 1);
     int inFlight;
+    volatile bool unloading;
+    public bool IsUnloading => unloading;
     public Controller Controller => controller;
+    public string? LoadedProfile => IsReady ? host?.SelectedProfile ?? "default" : null;
+
+    public async Task<IDisposable> AdmitRequest(string? profile, CancellationToken ct)
+    {
+        var activity = BeginRequest();
+        try
+        {
+            ProfileAdmission router;
+            lock (sync) router = admission ??= new ProfileAdmission(SelectProfile);
+            return new RequestLease(await router.Enter(profile, ct), activity);
+        }
+        catch { activity.Dispose(); throw; }
+    }
+    sealed class RequestLease(IDisposable admission, IDisposable activity) : IDisposable
+    {
+        public void Dispose() { admission.Dispose(); activity.Dispose(); }
+    }
+    async Task SelectProfile(string? profile, CancellationToken ct)
+    {
+        await lifecycle.WaitAsync(ct);
+        try
+        {
+            if (host is not null && host.SelectedProfile != profile)
+            {
+                // Admission has drained every old-profile response, including SSE.
+                // Finish a shared load even if its original caller disconnected.
+                if (load is { IsCompleted: false }) await load.WaitAsync(ct);
+                await SaveThenStop(ct);
+                if (!controller.Status.Equals("Stopped")) throw new InvalidOperationException(controller.Status);
+                host.SelectedProfile = profile;
+                VramGaveUp = false;
+            }
+            await EnsureReady(ct);
+        }
+        finally { lifecycle.Release(); }
+    }
     public TimeSpan? IdleTimeout { get; set; } = TimeSpan.FromMinutes(Policy.DefaultIdleMinutes);
     public DateTimeOffset LastActivity { get; private set; } = DateTimeOffset.MinValue;
     public ReplyStats? LastReply { get; private set; }
@@ -54,6 +94,7 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
     {
         get
         {
+            if (unloading) return TrayState.Loading;
             if (VramWaitUntil is not null) return TrayState.Loading;
             var s = controller.Status;
             if (s.StartsWith("Error:")) return TrayState.Error;
@@ -137,24 +178,35 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
     }
     async Task SaveThenStop(CancellationToken ct)
     {
-        if (host is not null && IsReady)
+        unloading = true;
+        Changed?.Invoke();
+        try
         {
-            try { await host.SaveSession(ct); } catch (Exception) when (!ct.IsCancellationRequested) { }
+            if (host is not null && IsReady)
+            {
+                try { await host.SaveSession(ct); } catch (Exception) when (!ct.IsCancellationRequested) { }
+            }
+            await controller.Stop(ct);
         }
-        await controller.Stop(ct);
+        finally { unloading = false; Changed?.Invoke(); }
     }
     // Called periodically. Returns true when it unloaded the model.
     public async Task<bool> IdleTick(CancellationToken ct)
     {
-        lock (sync)
+        await lifecycle.WaitAsync(ct);
+        try
         {
-            if (!IsReady || inFlight > 0 || IdleTimeout is null || load is { IsCompleted: false }) return false;
-            if (LastActivity == DateTimeOffset.MinValue) { LastActivity = now(); return false; } // adopted at startup: start the clock now
-            if (now() - LastActivity < IdleTimeout.Value) return false;
+            lock (sync)
+            {
+                if (!IsReady || inFlight > 0 || IdleTimeout is null || load is { IsCompleted: false }) return false;
+                if (LastActivity == DateTimeOffset.MinValue) { LastActivity = now(); return false; } // adopted at startup: start the clock now
+                if (now() - LastActivity < IdleTimeout.Value) return false;
+            }
+            await SaveThenStop(ct);
+            Changed?.Invoke();
+            return true;
         }
-        await SaveThenStop(ct);
-        Changed?.Invoke();
-        return true;
+        finally { lifecycle.Release(); }
     }
     public Task Unload(CancellationToken ct) => SaveThenStop(ct);
     // Quit: abandon any pending load (its own cleanup stops a half-started engine), then unload.

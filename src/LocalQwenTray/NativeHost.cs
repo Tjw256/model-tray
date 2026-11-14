@@ -7,10 +7,20 @@ using System.Text.RegularExpressions;
 namespace LocalQwenTray;
 internal record CommandResult(int ExitCode, string Output, string Error);
 internal interface ICommandRunner { Task<CommandResult> Run(string file, string[] args, TimeSpan timeout, CancellationToken ct); }
-internal record NativeIdentity(int Pid, long StartTimeUtcTicks, string Executable, int ContextTokens, int BudgetMiB, string? Variant = null, int Slots = 1);
+internal record NativeIdentity(int Pid, long StartTimeUtcTicks, string Executable, int ContextTokens, int BudgetMiB, string? Variant = null, int Slots = 1, string? Profile = null, JsonElement? Fingerprint = null);
 internal sealed class NativeHost(AppConfig config, ICommandRunner commands, HttpClient http, string? stateDirectory = null) : IQwenHost
 {
     readonly string key = config.ApiKey;
+    public string? SelectedProfile { get; set; }
+    public string? OwnedProfile => ReadIdentity() is { } id && OwnedNativeProcess.Matches(id.Pid,id.StartTimeUtcTicks,Executable) ? id.Profile : null;
+    ModelProfile? Profile => SelectedProfile is null ? null : config.Profiles[SelectedProfile];
+    int? codingContext;
+    public int CodingContext => SelectedProfile is null && Loaded() is { } loaded ? loaded.Context : codingContext ?? Choice.Context;
+    public async Task<object> Fingerprint(string name, CancellationToken ct)
+    {
+        if (ReadIdentity() is { } id && OwnedNativeProcess.Matches(id.Pid,id.StartTimeUtcTicks,Executable) && id.Profile == name && id.Fingerprint is { } fingerprint) return fingerprint;
+        return await ProfileFingerprint.Read(name, config.Profiles[name], Executable, LogPath, ct);
+    }
     public string Executable => Path.GetFullPath(config.LlamaServer);
     public LaunchChoice Choice { get; set; } = LaunchChoice.Default;
     // Called with the allocated context after each verified load (the tray keeps OpenCode's limit in step).
@@ -41,20 +51,21 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
         using var reader=new StreamReader(stream);
         return await reader.ReadToEndAsync(ct);
     }
-    public static void ValidateResidency(string log)
+    public static void ValidateResidency(string log) => ValidateProfileResidency(log, true);
+    internal static void ValidateProfileResidency(string log, bool mtp)
     {
         // The vision projector loads after the language model's context is created and logs its own buffers;
         // the CPU-weights check applies to the language-model load section only.
         int contextStart=log.IndexOf("llama_context:",StringComparison.Ordinal);
         string modelSection=contextStart>=0 ? log[..contextStart] : log;
-        if(!Regex.IsMatch(log,@"offloaded (\d+)/\1 layers to GPU") || !log.Contains("CUDA0 model buffer size") || Regex.IsMatch(modelSection,@"(?m)(?:CPU\w*|CUDA_Host)\s+model buffer size") || Regex.Matches(log,@"CUDA0 KV buffer size").Count < 2 || Regex.IsMatch(log,@"(?:CPU\w*|CUDA_Host)\s+KV buffer size") || !log.Contains("creating MTP draft context against the target model") || !log.Contains("adding speculative implementation 'draft-mtp'")) throw new InvalidOperationException("Native GPU-only residency verification failed; CPU model weights or missing main/draft GPU KV evidence");
+        if(!Regex.IsMatch(log,@"offloaded (\d+)/\1 layers to GPU") || !log.Contains("CUDA0 model buffer size") || Regex.IsMatch(modelSection,@"(?m)(?:CPU\w*|CUDA_Host)\s+model buffer size") || Regex.Matches(log,@"CUDA0 KV buffer size").Count < (mtp ? 2 : 1) || Regex.IsMatch(log,@"(?:CPU\w*|CUDA_Host)\s+KV buffer size") || mtp && (!log.Contains("creating MTP draft context against the target model") || !log.Contains("adding speculative implementation 'draft-mtp'"))) throw new InvalidOperationException("Native GPU-only residency verification failed; CPU model weights or missing main/draft GPU KV evidence");
     }
     public async Task VerifyResidency(ProbeResult probe,CancellationToken ct)
     {
         var identity=ReadIdentity();
         if(identity is null || !Valid(identity)) throw new InvalidOperationException("Native ownership lost before residency verification");
         if(probe.Detail!=$"context {identity.ContextTokens} tokens") throw new InvalidOperationException("Allocated context differs from requested native budget");
-        ValidateResidency(await ReadLiveLog(LogPath,ct));
+        ValidateProfileResidency(await ReadLiveLog(LogPath,ct), Profile is null || Profile.Arguments.Any(a => a.Split(',').Contains("draft-mtp")));
     }
     public async Task<IDisposable> AcquireLease(CancellationToken ct)
     {
@@ -102,6 +113,7 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
     static int WeightSaving(long modelBytes)=>Policy.ReferenceWeightsMiB-(int)(modelBytes/(1024*1024));
     public async Task<bool> Fits(CancellationToken ct)
     {
+        if (Profile is { } profile) return (await FreeVram(ct)).FreeMiB >= profile.RequiredFreeMiB;
         if(OllamaModels.Find(Choice.Variant) is not { } files) return true;   // let the load itself report the missing model
         try { Policy.ChooseLaunch(Policy.Budget(await FreeVram(ct)),Choice.Context,Choice.Slots,WeightSaving(files.ModelBytes)); return true; }
         catch(InsufficientVramException) { return false; }
@@ -112,25 +124,37 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
         if((await Inspect(ct)).Running) throw new InvalidOperationException("Owned process already exists; use Start to adopt it");
         if(await Listening(ct)) throw new InvalidOperationException($"Unowned listener on internal port {Policy.BackendPort}; no process was stopped");
         var choice=Choice;
-        var files=OllamaModels.Find(choice.Variant)
-            ?? throw new FileNotFoundException($"Model {choice.Variant} is not downloaded in Ollama; run: ollama pull {OllamaModels.Repository}:{choice.Variant}");
+        var profile = Profile;
+        var files=profile is null ? OllamaModels.Find(choice.Variant)
+            ?? throw new FileNotFoundException($"Model {choice.Variant} is not downloaded in Ollama; run: ollama pull {OllamaModels.Repository}:{choice.Variant}")
+            : new ModelFiles(SelectedProfile!, Path.GetFullPath(profile.ModelFile), profile.Projector, new FileInfo(profile.ModelFile).Length);
         int saving=WeightSaving(files.ModelBytes);
         int budget=Policy.Budget(memory);
-        var (context,slots)=Policy.ChooseLaunch(budget,choice.Context,choice.Slots,saving);
+        var (context,slots)=profile is null ? Policy.ChooseLaunch(budget,choice.Context,choice.Slots,saving) : (profile.ContextTokens, profile.Slots);
+        if (profile is not null && memory.FreeMiB < profile.RequiredFreeMiB)
+            throw new InsufficientVramException(memory.FreeMiB, profile.RequiredFreeMiB, $"Profile {SelectedProfile} needs {profile.RequiredFreeMiB} MiB free VRAM; exact launch settings will not be reduced");
         if(!File.Exists(Executable)) throw new FileNotFoundException($"llama-server.exe not found at {Executable}; set LlamaServer in {AppConfig.PathIn(StateDirectory)}");
-        if(ChatTemplatePath is not null && !File.Exists(ChatTemplatePath)) throw new FileNotFoundException($"Chat template not found at {ChatTemplatePath}; fix or clear ChatTemplate in config.json");
+        var template = profile is null ? ChatTemplatePath : profile.ChatTemplate;
+        if(template is not null && !File.Exists(template)) throw new FileNotFoundException($"Chat template not found at {template}; fix or clear ChatTemplate in config.json");
         Directory.CreateDirectory(StateDirectory);
         Directory.CreateDirectory(SessionDirectory);
         // Separate per-load engine log; credentials travel only through the child environment.
-        if(File.Exists(LogPath)) File.Copy(LogPath,LogPath+".previous",true);
+        if(File.Exists(LogPath))
+        {
+            var history = Path.Combine(StateDirectory,"engine-logs");
+            Directory.CreateDirectory(history);
+            File.Copy(LogPath,Path.Combine(history,$"{DateTime.UtcNow:yyyyMMddTHHmmssfffffffZ}-{Guid.NewGuid():N}.log"));
+            File.Copy(LogPath,LogPath+".previous",true);
+        }
         File.WriteAllText(LogPath,"");
         var info=new ProcessStartInfo(Executable){UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=Path.GetDirectoryName(Executable)!};
         ConfigureEnvironment(info,key);
-        foreach(var arg in BuildArguments(files.Model,files.Projector,context,LogPath,ChatTemplatePath,slots)) info.ArgumentList.Add(arg);
+        foreach(var arg in profile is null ? BuildArguments(files.Model,files.Projector,context,LogPath,template,slots) : profile.BuildArguments(SelectedProfile!,LogPath)) info.ArgumentList.Add(arg);
+        JsonElement? fingerprint = profile is null ? null : JsonSerializer.SerializeToElement(await ProfileFingerprint.Read(SelectedProfile!,profile,Executable,LogPath,ct));
         using var process=DetachedNative.Start(info);
         try
         {
-            var identity=new NativeIdentity(process.Id,process.StartTime.ToUniversalTime().Ticks,Executable,context,budget,choice.Variant,slots);
+            var identity=new NativeIdentity(process.Id,process.StartTime.ToUniversalTime().Ticks,Executable,context,budget,files.Variant,slots,SelectedProfile,fingerprint);
             for(int i=0; i<50 && !OwnedNativeProcess.Matches(identity.Pid,identity.StartTimeUtcTicks,Executable); i++)
             {
                 if(process.HasExited) throw new InvalidOperationException("Native process exited before ownership could be verified");
@@ -169,19 +193,20 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
             if (!response.IsSuccessStatusCode) return new(false, false, $"models HTTP {(int)response.StatusCode}");
             using var models = JsonDocument.Parse(await response.Content.ReadAsStringAsync(deadline.Token));
             var entries = models.RootElement.GetProperty("data").EnumerateArray().ToArray();
-            bool Matches(JsonElement entry) => entry.GetProperty("id").GetString() == Policy.Model || entry.TryGetProperty("aliases", out var aliases) && aliases.EnumerateArray().Any(x => x.GetString() == Policy.Model);
+            var alias = SelectedProfile ?? Policy.Model;
+            bool Matches(JsonElement entry) => entry.GetProperty("id").GetString() == alias || entry.TryGetProperty("aliases", out var aliases) && aliases.EnumerateArray().Any(x => x.GetString() == alias);
             if (!entries.Any(Matches)) return new(false,true);
             var entry = entries.First(Matches);
             var responseIdentity = entry.GetProperty("id").GetString();
             int context = entry.GetProperty("meta").GetProperty("n_ctx").GetInt32();
-            if (context < Policy.MinimumContext || context > Policy.ContextCap) return new(false,true,"Invalid allocated agent context");
+            if (Profile is { } selected ? context != selected.ContextTokens : context < Policy.MinimumContext || context > Policy.ContextCap) return new(false,true,"Invalid allocated agent context");
             string detail = $"context {context} tokens";
             // A live models response observes engine availability without occupying a sequence.
             if (!verifyInference) return new(true, false, detail);
             using var completion = Request(HttpMethod.Post, "chat/completions");
             completion.Content = new StringContent(JsonSerializer.Serialize(new
             {
-                model = Policy.Model, messages = new[] { new { role = "user", content = "Reply OK." } },
+                model = alias, messages = new[] { new { role = "user", content = "Reply OK." } },
                 max_tokens = 16, temperature = 0, stream = false,
                 chat_template_kwargs = new { enable_thinking = false }
             }), Encoding.UTF8, "application/json");
@@ -208,8 +233,10 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
     }
     public async Task SyncContext(ProbeResult probe, CancellationToken ct)
     {
+        if (SelectedProfile is not null) return; // extraction must not rewrite coding clients' context limits
         var match = Regex.Match(probe.Detail, @"^context (\d+) tokens$");
         if (!probe.Ready || !match.Success) throw new InvalidOperationException("Model loaded but actual context unavailable; client metadata was not updated");
+        codingContext = int.Parse(match.Groups[1].Value);
         try { ContextLoaded?.Invoke(int.Parse(match.Groups[1].Value)); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException) { }
         // Optional hook (config ClientSyncCommand) that tells clients the allocated context; runs only when it changed.
         if (config.ClientSyncCommand is not { Length: > 0 } command) return;
@@ -242,6 +269,7 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
     // Each slot that holds a long conversation is saved separately (two slots: e.g. a background job and a chat).
     public async Task SaveSession(CancellationToken ct)
     {
+        if (SelectedProfile is not null) return; // exact profiles have no implicit session/cache flags
         if (Loaded() is not { } loaded) return;
         try
         {
@@ -261,6 +289,7 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
     }
     public async Task RestoreSession(CancellationToken ct)
     {
+        if (SelectedProfile is not null) return;
         if (Loaded() is not { } loaded || !File.Exists(SessionInfoPath)) return;
         try
         {

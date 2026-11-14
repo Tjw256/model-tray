@@ -2,6 +2,7 @@ namespace LocalQwenTray;
 // A deterministic in-memory boundary: never invokes Docker, GPU tools or networking.
 internal sealed class TestHost : IQwenHost
 {
+    public string? SelectedProfile { get; set; }
     public EngineState State = new(false, false, 0);
     public ProbeResult Health = new(false);
     public int Total = 32607, LastBudget, LastContext, LastSlots;
@@ -30,7 +31,8 @@ internal sealed class TestHost : IQwenHost
     public Task SyncContext(ProbeResult probe, CancellationToken ct) { SyncCalls++; return Task.CompletedTask; }
     public Task<string> Diagnostics(CancellationToken ct) => Task.FromResult("test diagnostics");
     public int SaveCalls, RestoreCalls;
+    public Func<CancellationToken, Task>? SaveHook;
     public List<string> SessionEvents = [];
-    public Task SaveSession(CancellationToken ct) { SaveCalls++; SessionEvents.Add(State.Running ? "save-while-running" : "save-after-stop"); return Task.CompletedTask; }
+    public Task SaveSession(CancellationToken ct) { SaveCalls++; SessionEvents.Add(State.Running ? "save-while-running" : "save-after-stop"); return SaveHook?.Invoke(ct) ?? Task.CompletedTask; }
     public Task RestoreSession(CancellationToken ct) { RestoreCalls++; SessionEvents.Add(State.Running ? "restore-while-running" : "restore-without-engine"); return Task.CompletedTask; }
 }
