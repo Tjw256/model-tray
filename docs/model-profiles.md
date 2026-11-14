@@ -120,7 +120,10 @@ the log destination can therefore change the fingerprint too.
 The fingerprint is captured before each exact-profile launch and saved with the
 owned process receipt. While that process is alive the endpoint returns its captured
 fingerprint, even if files have since changed on disk. While unloaded it hashes the
-configured files without launching anything. Full GGUF hashing can take seconds.
+configured files without launching anything. The tray reuses a file's digest while
+its size and last write time stay the same, so only the first fingerprint after the
+tray starts, or after a file changes, reads the whole GGUF: about 25 s for Savannah's
+20.9 GiB model, before llama-server starts.
 A missing/unsupported template or unreadable asset returns 503, never an invented
 digest. The adaptive legacy route is not an exact named profile.
 

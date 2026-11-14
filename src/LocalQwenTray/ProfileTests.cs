@@ -62,11 +62,16 @@ internal static class ProfileTests
                 return JsonSerializer.SerializeToElement(result).GetProperty("sha256").GetString()!;
             }
             var initial = await Digest();
+            int filesRead = ProfileFingerprint.FilesRead;
             SelfTests.Check("fingerprint is deterministic and reads the embedded template", initial == await Digest() && ProfileFingerprint.EmbeddedTemplate(profile.ModelFile) == "{{ messages }}");
+            SelfTests.Check("unchanged files are not read again for the next fingerprint", ProfileFingerprint.FilesRead == filesRead);
             Model("changed template");
             var changed = await Digest();
             SelfTests.Check("GGUF/template change invalidates the fingerprint", changed != initial);
+            // Same length as build one: only the new write time tells the builds apart, as
+            // with a replaced llama.cpp folder. Set it explicitly so the clock can't tie.
             await File.WriteAllTextAsync(exe, "synthetic build two");
+            File.SetLastWriteTimeUtc(exe, File.GetLastWriteTimeUtc(exe).AddSeconds(1));
             initial = await Digest();
             SelfTests.Check("llama build change invalidates the fingerprint", initial != changed);
             profile.Arguments = [..profile.Arguments, "--seed", "43"];

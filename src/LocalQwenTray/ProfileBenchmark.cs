@@ -12,17 +12,27 @@ namespace LocalQwenTray;
 // at a time. The live tray is left alone and its occupied backend port is refused.
 internal static class ProfileBenchmark
 {
-    static async Task GuardGpu(ProcessRunner runner, CancellationToken ct)
+    static async Task GuardGpu(ProcessRunner runner, CancellationToken ct, TimeSpan settle = default)
     {
-        // WDDM's query-compute-apps also lists desktop C+G applications. The full
-        // table distinguishes compute-only jobs; independently reject model processes.
-        var result = await runner.Run("nvidia-smi", [], TimeSpan.FromSeconds(15), ct);
-        bool modelProcess = new[] { "llama-server", "ollama_llama_server" }.Any(name => Process.GetProcessesByName(name).Length > 0);
-        if (result.ExitCode != 0 || !result.Output.Contains("Processes:") || Regex.IsMatch(result.Output,@"\sC\s") || modelProcess)
-            throw new InvalidOperationException("GPU compute/model process detected or GPU status unavailable; no test model was started");
-        var memory = await runner.Run("nvidia-smi", ["--query-gpu=memory.free", "--format=csv,noheader,nounits", "--id=0"], TimeSpan.FromSeconds(15), ct);
-        if (memory.ExitCode != 0 || !int.TryParse(memory.Output.Trim(),out var free) || free < 25000)
-            throw new InvalidOperationException("Less than 25000 MiB free VRAM or memory snapshot unavailable; no test model was started");
+        // nvidia-smi keeps listing a llama-server for about 0.5 s after it has exited, so
+        // the check after our own direct baseline waits up to `settle` for the GPU to clear.
+        var waited = Stopwatch.StartNew();
+        while (true)
+        {
+            // WDDM's query-compute-apps also lists desktop C+G applications. The full
+            // table distinguishes compute-only jobs; independently reject model processes.
+            var result = await runner.Run("nvidia-smi", [], TimeSpan.FromSeconds(15), ct);
+            bool modelProcess = new[] { "llama-server", "ollama_llama_server" }.Any(name => Process.GetProcessesByName(name).Length > 0);
+            bool busy = result.ExitCode != 0 || !result.Output.Contains("Processes:") || Regex.IsMatch(result.Output,@"\sC\s") || modelProcess;
+            var memory = busy ? null : await runner.Run("nvidia-smi", ["--query-gpu=memory.free", "--format=csv,noheader,nounits", "--id=0"], TimeSpan.FromSeconds(15), ct);
+            bool lowMemory = memory is not null && (memory.ExitCode != 0 || !int.TryParse(memory.Output.Trim(),out var free) || free < 25000);
+            if (!busy && !lowMemory) break;
+            if (waited.Elapsed >= settle)
+                throw new InvalidOperationException(busy
+                    ? "GPU compute/model process detected or GPU status unavailable; no test model was started"
+                    : "Less than 25000 MiB free VRAM or memory snapshot unavailable; no test model was started");
+            await Task.Delay(250, ct);
+        }
         var listener = new TcpListener(IPAddress.Loopback, Policy.BackendPort);
         try { listener.Start(); } finally { listener.Stop(); }
     }
@@ -103,7 +113,7 @@ internal static class ProfileBenchmark
                 await process.WaitForExitAsync(CancellationToken.None);
             }
         }
-        await GuardGpu(runner, ct);
+        await GuardGpu(runner, ct, TimeSpan.FromSeconds(10));
         var host = new NativeHost(config, runner, client, Path.Combine(output,"state"));
         var supervisor = new Supervisor(new Controller(host), host: host);
         int port = FreePort();

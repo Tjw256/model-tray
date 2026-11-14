@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -6,10 +7,25 @@ namespace LocalQwenTray;
 internal static class ProfileFingerprint
 {
     internal static string Hash(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
+    // Hashing the 20.9 GiB Savannah GGUF and the CUDA DLLs took 30 s on the RTX 5090 PC,
+    // which every cold profile load paid before llama-server started. A digest is reused
+    // while the file keeps its size and last write time; any rewrite, replacement or
+    // copied-in build changes one of them and is read again.
+    static readonly ConcurrentDictionary<string, (long Length, long WriteTicks, string Digest)> digests = new(StringComparer.OrdinalIgnoreCase);
+    static int filesRead;
+    internal static int FilesRead => filesRead;
     static async Task<string> FileHash(string path, CancellationToken ct)
     {
-        await using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
-        return Convert.ToHexStringLower(await SHA256.HashDataAsync(file, ct));
+        var info = new FileInfo(path);
+        // Metadata is read before the content, so a file changed mid-read is read again next time.
+        long length = info.Length, writeTicks = info.LastWriteTimeUtc.Ticks;
+        if (digests.TryGetValue(info.FullName, out var known) && known.Length == length && known.WriteTicks == writeTicks) return known.Digest;
+        string digest;
+        await using (var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan))
+            digest = Convert.ToHexStringLower(await SHA256.HashDataAsync(file, ct));
+        Interlocked.Increment(ref filesRead);
+        digests[info.FullName] = (length, writeTicks, digest);
+        return digest;
     }
 
     public static async Task<object> Read(string name, ModelProfile profile, string executable, string log, CancellationToken ct)
