@@ -9,7 +9,7 @@ internal interface IQwenHost
     Task<IDisposable> AcquireLease(CancellationToken ct);
     Task<EngineState> Inspect(CancellationToken ct);
     Task<GpuMemory> FreeVram(CancellationToken ct);
-    Task<bool> Fits(string? profile, CancellationToken ct);   // would that profile's load (null: the default) fit in free VRAM right now
+    Task<bool> Fits(CancellationToken ct);                // would the next load fit in free VRAM right now
     Task LaunchNative(GpuMemory memory, CancellationToken ct);
     Task Stop(CancellationToken ct);
     Task<ProbeResult> Probe(CancellationToken ct, bool verifyInference = true);

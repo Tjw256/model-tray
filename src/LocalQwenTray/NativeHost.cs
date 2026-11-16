@@ -111,9 +111,9 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
     }
     // VRAM needs are measured on the reference quant; others differ by roughly their weights-file size.
     static int WeightSaving(long modelBytes)=>Policy.ReferenceWeightsMiB-(int)(modelBytes/(1024*1024));
-    public async Task<bool> Fits(string? name, CancellationToken ct)
+    public async Task<bool> Fits(CancellationToken ct)
     {
-        if (name is not null) return (await FreeVram(ct)).FreeMiB >= config.Profiles[name].RequiredFreeMiB;
+        if (Profile is { } profile) return (await FreeVram(ct)).FreeMiB >= profile.RequiredFreeMiB;
         if(OllamaModels.Find(Choice.Variant) is not { } files) return true;   // let the load itself report the missing model
         try { Policy.ChooseLaunch(Policy.Budget(await FreeVram(ct)),Choice.Context,Choice.Slots,WeightSaving(files.ModelBytes)); return true; }
         catch(InsufficientVramException) { return false; }
