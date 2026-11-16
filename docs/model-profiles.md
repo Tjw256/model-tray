@@ -69,7 +69,13 @@ is checked from startup logs; MTP evidence is required only when MTP is configur
 Missing files, insufficient VRAM, invalid flags and residency failures return 503.
 Insufficient VRAM has the error type `insufficient_vram`, both after the VRAM wait
 runs out and for requests refused at once while VRAM is still short, so a client can
-wait and send the request again. Every other failure has `server_error`.
+wait and send the request again. Every other failure has `server_error`, including a
+profile that needs more VRAM than the whole card.
+
+After a profile's VRAM wait has run out, a request for it is refused at once while it
+still doesn't fit, even after switching to another profile. It never unloads the
+profile in use for that, and other requests don't queue behind it. Once free VRAM
+fits it, the next request loads it as usual, and Load now always tries again.
 
 ## Status
 

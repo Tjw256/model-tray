@@ -110,6 +110,23 @@ internal static class SelfTests
         host.Free = 32000;
         await supervisor.EnsureReady(default);
         Check("once VRAM fits again, the next request loads normally", supervisor.IsReady && !supervisor.VramGaveUp && notices == 2);
+
+        host = new TestHost { Free = 20000 }; notices = 0;
+        supervisor = new Supervisor(new Controller(host), () => clock, host, (span, _) => { clock += span; return Task.CompletedTask; }) { VramWait = TimeSpan.FromMinutes(1) };
+        supervisor.VramShort += (_, _) => notices++;
+        static async Task Admit(Supervisor s, string? profile) => (await s.AdmitRequest(profile, default)).Dispose();
+        var waited = await Fails(() => Admit(supervisor, "savannah-extraction"));
+        host.Free = 32000;
+        await Admit(supervisor, null);
+        host.Free = 20000;   // the default model now holds the VRAM
+        int stops = host.StopCalls, ups = host.UpCalls;
+        var refused = await Fails(() => Admit(supervisor, "savannah-extraction"));
+        Check("a profile whose VRAM wait ran out is refused at once, without unloading the profile in use or a new wait",
+            waited is InsufficientVramException && refused is InsufficientVramException && refused.Message.Contains("still short")
+            && notices == 1 && host.StopCalls == stops && host.UpCalls == ups && supervisor.IsReady && host.SelectedProfile is null);
+        host.Free = 32000;
+        await Admit(supervisor, "savannah-extraction");
+        Check("once it fits, that profile loads and its give-up clears", supervisor.IsReady && host.SelectedProfile == "savannah-extraction" && !supervisor.VramGaveUp && notices == 1);
         Check("VRAM wait setting defaults to 5 minutes and falls back safely",
             new AppSettings().VramWaitOrDefault == 5 && new AppSettings { VramWaitMinutes = 7 }.VramWaitOrDefault == 5 && Policy.VramWaitChoices.Contains(15));
     }

@@ -12,7 +12,7 @@ namespace LocalQwenTray;
 // at a time. The live tray is left alone and its occupied backend port is refused.
 internal static class ProfileBenchmark
 {
-    static async Task GuardGpu(ProcessRunner runner, CancellationToken ct, TimeSpan settle = default)
+    static async Task GuardGpu(ProcessRunner runner, int needMiB, CancellationToken ct, TimeSpan settle = default)
     {
         // nvidia-smi keeps listing a llama-server for about 0.5 s after it has exited, so
         // the check after our own direct baseline waits up to `settle` for the GPU to clear.
@@ -25,12 +25,12 @@ internal static class ProfileBenchmark
             bool modelProcess = new[] { "llama-server", "ollama_llama_server" }.Any(name => Process.GetProcessesByName(name).Length > 0);
             bool busy = result.ExitCode != 0 || !result.Output.Contains("Processes:") || Regex.IsMatch(result.Output,@"\sC\s") || modelProcess;
             var memory = busy ? null : await runner.Run("nvidia-smi", ["--query-gpu=memory.free", "--format=csv,noheader,nounits", "--id=0"], TimeSpan.FromSeconds(15), ct);
-            bool lowMemory = memory is not null && (memory.ExitCode != 0 || !int.TryParse(memory.Output.Trim(),out var free) || free < 25000);
+            bool lowMemory = memory is not null && (memory.ExitCode != 0 || !int.TryParse(memory.Output.Trim(),out var free) || free < needMiB);
             if (!busy && !lowMemory) break;
             if (waited.Elapsed >= settle)
                 throw new InvalidOperationException(busy
                     ? "GPU compute/model process detected or GPU status unavailable; no test model was started"
-                    : "Less than 25000 MiB free VRAM or memory snapshot unavailable; no test model was started");
+                    : $"Less than {needMiB} MiB free VRAM or memory snapshot unavailable; no test model was started");
             await Task.Delay(250, ct);
         }
         var listener = new TcpListener(IPAddress.Loopback, Policy.BackendPort);
@@ -78,7 +78,7 @@ internal static class ProfileBenchmark
         profile.Validate("savannah-extraction");
         var runner = new ProcessRunner();
         using var client = new HttpClient(new SocketsHttpHandler { UseProxy = false }) { Timeout = Timeout.InfiniteTimeSpan };
-        await GuardGpu(runner, ct);
+        await GuardGpu(runner, profile.RequiredFreeMiB, ct);
         // Independent baseline: flags transcribed from Savannah's saved :8001
         // command, with only host, port, alias and log destination changed.
         string[] directArgs = ["-m", profile.ModelFile, "-ngl", "999", "--fit", "off", "--load-mode", "none", "-c", "32768", "-np", "1", "-t", "4", "-tb", "4", "-b", "512", "-ub", "512", "-fa", "on", "-ctk", "f16", "-ctv", "f16", "--spec-type", "draft-mtp", "--spec-draft-sampling", "probabilistic", "--no-host", "--spec-draft-n-max", "5", "--spec-draft-ngl", "999", "--spec-draft-threads", "4", "--spec-draft-threads-batch", "4", "--spec-draft-type-k", "f16", "--spec-draft-type-v", "f16", "-lv", "4", "--override-tensor", "token_embd.weight=CUDA0", "--host", "127.0.0.1", "--port", Policy.BackendPort.ToString(), "--alias", "savannah-extraction", "--jinja", "--reasoning-format", "deepseek", "--slots", "--log-colors", "off", "--log-file", Path.Combine(output,"direct.log")];
@@ -113,7 +113,7 @@ internal static class ProfileBenchmark
                 await process.WaitForExitAsync(CancellationToken.None);
             }
         }
-        await GuardGpu(runner, ct, TimeSpan.FromSeconds(10));
+        await GuardGpu(runner, profile.RequiredFreeMiB, ct, TimeSpan.FromSeconds(10));
         var host = new NativeHost(config, runner, client, Path.Combine(output,"state"));
         var supervisor = new Supervisor(new Controller(host), host: host);
         int port = FreePort();

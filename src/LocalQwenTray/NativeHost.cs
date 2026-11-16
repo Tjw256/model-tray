@@ -111,9 +111,9 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
     }
     // VRAM needs are measured on the reference quant; others differ by roughly their weights-file size.
     static int WeightSaving(long modelBytes)=>Policy.ReferenceWeightsMiB-(int)(modelBytes/(1024*1024));
-    public async Task<bool> Fits(CancellationToken ct)
+    public async Task<bool> Fits(string? name, CancellationToken ct)
     {
-        if (Profile is { } profile) return (await FreeVram(ct)).FreeMiB >= profile.RequiredFreeMiB;
+        if (name is not null) return (await FreeVram(ct)).FreeMiB >= config.Profiles[name].RequiredFreeMiB;
         if(OllamaModels.Find(Choice.Variant) is not { } files) return true;   // let the load itself report the missing model
         try { Policy.ChooseLaunch(Policy.Budget(await FreeVram(ct)),Choice.Context,Choice.Slots,WeightSaving(files.ModelBytes)); return true; }
         catch(InsufficientVramException) { return false; }
@@ -131,6 +131,9 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
         int saving=WeightSaving(files.ModelBytes);
         int budget=Policy.Budget(memory);
         var (context,slots)=profile is null ? Policy.ChooseLaunch(budget,choice.Context,choice.Slots,saving) : (profile.ContextTokens, profile.Slots);
+        // More than the whole card can never fit, so that is an error to fix, not a shortage to wait out.
+        if (profile is not null && profile.RequiredFreeMiB > memory.TotalMiB)
+            throw new InvalidOperationException($"Profile {SelectedProfile} needs {profile.RequiredFreeMiB} MiB free VRAM, more than this GPU's {memory.TotalMiB} MiB");
         if (profile is not null && memory.FreeMiB < profile.RequiredFreeMiB)
             throw new InsufficientVramException(memory.FreeMiB, profile.RequiredFreeMiB, $"Profile {SelectedProfile} needs {profile.RequiredFreeMiB} MiB free VRAM; exact launch settings will not be reduced");
         if(!File.Exists(Executable)) throw new FileNotFoundException($"llama-server.exe not found at {Executable}; set LlamaServer in {AppConfig.PathIn(StateDirectory)}");

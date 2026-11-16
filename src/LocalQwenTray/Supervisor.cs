@@ -48,6 +48,11 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
 
     public async Task<IDisposable> AdmitRequest(string? profile, CancellationToken ct)
     {
+        // A profile whose VRAM wait ran out is refused at once while it still doesn't fit, before it waits for a turn:
+        // no other profile is unloaded for it, no request queues behind it, and it doesn't count as activity, so the
+        // profile in use still unloads when idle. Once it fits, the request loads it as usual.
+        if (gaveUp is { } shortage && gaveUpProfile == profile && host is not null && !await host.Fits(profile, ct))
+            throw new InsufficientVramException(shortage.FreeMiB, shortage.NeedMiB, StillShort);
         var activity = BeginRequest();
         try
         {
@@ -74,7 +79,6 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
                 await SaveThenStop(ct);
                 if (!controller.Status.Equals("Stopped")) throw new InvalidOperationException(controller.Status);
                 host.SelectedProfile = profile;
-                VramGaveUp = false;
             }
             await EnsureReady(ct);
         }
@@ -88,7 +92,12 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
     public event Action<InsufficientVramException, TimeSpan>? VramShort;   // once per shortage, with how long requests will wait
     public TimeSpan VramWait { get; set; } = TimeSpan.FromMinutes(Policy.DefaultVramWaitMinutes);
     public DateTimeOffset? VramWaitUntil { get; private set; }            // set while requests wait for VRAM
-    public bool VramGaveUp { get; private set; }                         // the last wait ran out: refuse quietly
+    // The shortage that ended the last VRAM wait and the profile it was for (null is the default model). A switch to
+    // another profile keeps it, so a client sending the same request again while VRAM is still short starts no new wait.
+    InsufficientVramException? gaveUp;
+    string? gaveUpProfile;
+    const string StillShort = "Not enough free VRAM for Local Qwen (still short after waiting). Free VRAM, then retry or click Load now.";
+    public bool VramGaveUp => gaveUp is not null && gaveUpProfile == host?.SelectedProfile;   // this profile's last wait ran out: refuse quietly
     public bool IsReady => controller.Status.StartsWith("Ready");
     public TrayState State
     {
@@ -152,9 +161,9 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
     // Restores the conversation saved at the last unload, but only into an engine this load actually started.
     async Task LoadAndRestore(bool manual, CancellationToken ct)
     {
-        if (VramGaveUp && !manual && host is not null && !await host.Fits(ct))
-            throw new InsufficientVramException(controller.LastShortage?.FreeMiB ?? 0, controller.LastShortage?.NeedMiB ?? 0, "Not enough free VRAM for Local Qwen (still short after waiting). Free VRAM, then retry or click Load now.");
-        VramGaveUp = false;
+        if (VramGaveUp && gaveUp is { } earlier && !manual && host is not null && !await host.Fits(host.SelectedProfile, ct))
+            throw new InsufficientVramException(earlier.FreeMiB, earlier.NeedMiB, StillShort);
+        if (VramGaveUp) gaveUp = null;
         await controller.Start(ct);
         if (!IsReady && controller.LastShortage is { } shortage) await WaitForVram(shortage, ct);
         if (host is not null && IsReady && controller.LastStartLaunched)
@@ -172,13 +181,13 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
             while (host is not null && now() < VramWaitUntil)
             {
                 await pause(TimeSpan.FromSeconds(Policy.VramPollSeconds), ct);
-                if (!await host.Fits(ct)) continue;
+                if (!await host.Fits(host.SelectedProfile, ct)) continue;
                 await controller.Start(ct);
                 if (IsReady || controller.LastShortage is null) break;   // loaded, or failed for another reason (shown as usual)
             }
         }
         finally { VramWaitUntil = null; }
-        VramGaveUp = !IsReady && controller.LastShortage is not null;
+        if (!IsReady && controller.LastShortage is { } last) (gaveUp, gaveUpProfile) = (last, host?.SelectedProfile);
         Changed?.Invoke();
     }
     async Task SaveThenStop(CancellationToken ct)
