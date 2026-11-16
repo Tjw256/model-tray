@@ -50,6 +50,23 @@ flag. The template is the GGUF's embedded `tokenizer.chat_template`.
 This reproduces the saved benchmark configuration except for loopback binding,
 private backend port, API key, alias and log destination. It does not start Ollama.
 
+### Measured VRAM (RTX 5090, 32,607 MiB, 2026-11-15)
+
+| | 32K | 128K |
+|---|---|---|
+| Engine peak in VRAM | 25,308 MiB | 31,551 MiB, plus 1,386 MiB spilled to system RAM |
+| KV cache, main / MTP draft | 2,048 / 128 MiB | 8,192 / 512 MiB |
+| Prompt reading at about 20K tokens | 2,933 tok/s | 875 tok/s |
+
+Weights take 21,381 MiB and the recurrent state 898 MiB at any context. With f16 K/V,
+each extra 1K tokens of context costs about 70 MiB. At 128K the engine needs about
+32.0 to 32.4 GB, the whole card: Windows spills it into system RAM, pushes other apps'
+VRAM out, and prompts read 3 to 50 times slower. So the profile stays at 32K. Around
+80K is the most that fits next to typical desktop apps, and 64K needs about 27.9 GB
+free; both are estimates from the 70 MiB per 1K. A q8_0 K/V cache at 128K is
+estimated at 28.3 to 28.7 GB, untested, and quantised K/V changes the tokens, so it
+needs its own quality run first.
+
 ## Future models
 
 Add entries to `Profiles` in the private `config.json`, then restart the tray.
