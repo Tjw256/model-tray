@@ -71,9 +71,10 @@ Insufficient VRAM has the error type `insufficient_vram`, both after the VRAM wa
 runs out and for requests refused at once while VRAM is still short, and `need_mib`,
 the free VRAM the load needs. Every other failure has `server_error`, including a
 profile that needs more VRAM than the whole card. A client that waits should send the
-request again only once `/v1/status` shows no other profile loaded and `free_vram_mib`
-at least `need_mib`. Sooner, its request would unload a profile someone is using, or
-wait in the tray and hold up everyone else's requests.
+request again only once `/v1/status` shows its profile loaded, as after Load now, or
+shows nothing loaded, `busy` false, a `state` other than `loading` or `unloading`, and
+`free_vram_mib` at least `need_mib`. Sooner, its request would unload a profile someone
+is using, or wait in the tray and hold up everyone else's requests.
 
 ## Status
 
