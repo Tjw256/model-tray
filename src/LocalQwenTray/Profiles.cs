@@ -15,6 +15,9 @@ internal sealed class ModelProfile
 
     public static ModelProfile Savannah() => new()
     {
+        // Measured: the load peaked at 25,308 MiB at 32K (2026-11-15), plus the tray's 512 MiB headroom. At 25,000 a
+        // load could pass the check and still not fit.
+        RequiredFreeMiB = 25820,
         ModelFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ollama", "models", "blobs", "sha256-1a0d6fe2e48417f1571a57a7104b4d5da0c45c3d00de18fa7aa48affca5a24d7"),
         Arguments = ["-ngl", "999", "--load-mode", "none", "-t", "4", "-tb", "4", "-b", "512", "-ub", "512", "-fa", "on", "-ctk", "f16", "-ctv", "f16", "--spec-type", "draft-mtp", "--spec-draft-sampling", "probabilistic", "--no-host", "--spec-draft-n-max", "5", "--spec-draft-ngl", "999", "--spec-draft-threads", "4", "--spec-draft-threads-batch", "4", "--spec-draft-type-k", "f16", "--spec-draft-type-v", "f16", "-lv", "4", "--override-tensor", "token_embd.weight=CUDA0", "--reasoning-format", "deepseek", "--slots"]
     };

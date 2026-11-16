@@ -39,7 +39,8 @@ they already specify a `Profiles` dictionary. It reads this blob in place:
 %USERPROFILE%\.ollama\models\blobs\sha256-1a0d6fe2e48417f1571a57a7104b4d5da0c45c3d00de18fa7aa48affca5a24d7
 ```
 
-It uses 32768 context, one slot, f16 K/V for target and draft, shared-weight
+It needs 25,820 MiB of free VRAM: the load peaked at 25,308 MiB (2026-11-15), plus
+the tray's 512 MiB headroom. It uses 32768 context, one slot, f16 K/V for target and draft, shared-weight
 `draft-mtp` depth 5, probabilistic draft sampling, four target/draft threads,
 batch/ubatch 512, Flash Attention, all GPU layers, GPU embeddings,
 `--fit off --load-mode none --no-host --jinja --reasoning-format deepseek --slots`.
@@ -66,6 +67,14 @@ rejected because their assets are not yet covered by the fingerprint.
 Re-measure it for a new model. Profiles never shrink to fit. GPU-only placement
 is checked from startup logs; MTP evidence is required only when MTP is configured.
 Missing files, insufficient VRAM, invalid flags and residency failures return 503.
+Insufficient VRAM has the error type `insufficient_vram`, both after the VRAM wait
+runs out and for requests refused at once while VRAM is still short, and `need_mib`,
+the free VRAM the load needs. Every other failure has `server_error`, including a
+profile that needs more VRAM than the whole card. A client that waits should send the
+request again only once `/v1/status` shows its profile loaded, as after Load now, or
+shows nothing loaded, `busy` false, a `state` other than `loading` or `unloading`, and
+`free_vram_mib` at least `need_mib`. Sooner, its request would unload a profile someone
+is using, or wait in the tray and hold up everyone else's requests.
 
 ## Status
 

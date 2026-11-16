@@ -131,6 +131,9 @@ internal sealed class NativeHost(AppConfig config, ICommandRunner commands, Http
         int saving=WeightSaving(files.ModelBytes);
         int budget=Policy.Budget(memory);
         var (context,slots)=profile is null ? Policy.ChooseLaunch(budget,choice.Context,choice.Slots,saving) : (profile.ContextTokens, profile.Slots);
+        // More than the whole card can never fit, so that is an error to fix, not a shortage to wait out.
+        if (profile is not null && profile.RequiredFreeMiB > memory.TotalMiB)
+            throw new InvalidOperationException($"Profile {SelectedProfile} needs {profile.RequiredFreeMiB} MiB free VRAM, more than this GPU's {memory.TotalMiB} MiB");
         if (profile is not null && memory.FreeMiB < profile.RequiredFreeMiB)
             throw new InsufficientVramException(memory.FreeMiB, profile.RequiredFreeMiB, $"Profile {SelectedProfile} needs {profile.RequiredFreeMiB} MiB free VRAM; exact launch settings will not be reduced");
         if(!File.Exists(Executable)) throw new FileNotFoundException($"llama-server.exe not found at {Executable}; set LlamaServer in {AppConfig.PathIn(StateDirectory)}");
