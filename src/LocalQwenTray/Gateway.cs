@@ -87,7 +87,8 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         IDisposable lease;
         try { lease = await supervisor.AdmitRequest(profile, ctx.RequestAborted); }
         catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { return; }
-        catch (Exception ex) { log?.Invoke("On-demand load failed: " + ex.Message); await Error(ctx, 503, "Local Qwen could not load: " + ex.Message, "server_error"); return; }
+        // A VRAM shortage has its own error type: the request can go again once VRAM frees, unlike any other failure.
+        catch (Exception ex) { log?.Invoke("On-demand load failed: " + ex.Message); await Error(ctx, 503, "Local Qwen could not load: " + ex.Message, ex is InsufficientVramException ? "insufficient_vram" : "server_error"); return; }
         using (lease)
         try { await Forward(ctx, path, modelList, requestBody, profile is null); }
         catch (Exception ex) when (ex is HttpRequestException or IOException)

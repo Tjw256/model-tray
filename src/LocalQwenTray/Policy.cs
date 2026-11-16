@@ -53,7 +53,8 @@ internal static class Policy
     // Do NOT set NVIDIA "CUDA - Sysmem Fallback Policy = Prefer No Sysmem Fallback" for llama-server.exe: with the
     // model resident it made the whole desktop (mouse, typing, both monitors) lag by seconds; reverting it to
     // Driver Default fixed that (2026-10-08). With fallback allowed, a load that does not fit would silently spill
-    // into system RAM, so loads are checked up front instead. CUDA does not evict other apps' VRAM.
+    // into system RAM, so loads are checked up front instead. Nor is other apps' VRAM safe: a 128K Savannah load that
+    // did not fit pushed other apps' VRAM into system RAM (2026-11-15), so a load that passes the check must really fit.
     public static int Need(int context, int weightSavingMiB, int slots = 1)
     {
         int engine = context >= Ctx256 ? Q5Need256 : context >= Ctx192 ? Q5Need192 : context >= Ctx128 ? Q5Need128 : Q5Need128 - (Ctx128 - context) / 1024 * MiBPer1KBelow128;

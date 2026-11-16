@@ -98,12 +98,13 @@ internal static class SelfTests
         host = new TestHost { Free = 20000 }; pauses = 0; freeAfter = int.MaxValue; notices = 0;
         supervisor = new Supervisor(new Controller(host), () => clock, host, (span, _) => { clock += span; pauses++; return Task.CompletedTask; }) { VramWait = TimeSpan.FromMinutes(5) };
         supervisor.VramShort += (_, _) => notices++;
-        static async Task<string?> Fails(Func<Task> load) { try { await load(); return null; } catch (InvalidOperationException ex) { return ex.Message; } }
+        static async Task<InvalidOperationException?> Fails(Func<Task> load) { try { await load(); return null; } catch (InvalidOperationException ex) { return ex; } }
         var first = await Fails(() => supervisor.EnsureReady(default));
         Check("when VRAM never frees, the wait gives up after the set time", first is not null && supervisor.VramGaveUp && pauses == 5 * 60 / Policy.VramPollSeconds && notices == 1);
         int freeCalls = host.FreeCalls; var status = supervisor.Controller.Status;
         var quiet = await Fails(() => supervisor.EnsureReady(default));
-        Check("after giving up, requests fail at once: no notice, no load attempt", quiet?.Contains("still short") == true && notices == 1 && host.FreeCalls == freeCalls && supervisor.Controller.Status == status);
+        Check("after giving up, requests fail at once: no notice, no load attempt", quiet?.Message.Contains("still short") == true && notices == 1 && host.FreeCalls == freeCalls && supervisor.Controller.Status == status);
+        Check("both refusals are VRAM shortages, which the gateway marks insufficient_vram", first is InsufficientVramException && quiet is InsufficientVramException);
         await Fails(() => supervisor.LoadNow(default));
         Check("Load now retries and waits again with one new notice", notices == 2 && supervisor.VramGaveUp);
         host.Free = 32000;

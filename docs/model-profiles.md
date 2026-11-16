@@ -39,7 +39,8 @@ they already specify a `Profiles` dictionary. It reads this blob in place:
 %USERPROFILE%\.ollama\models\blobs\sha256-1a0d6fe2e48417f1571a57a7104b4d5da0c45c3d00de18fa7aa48affca5a24d7
 ```
 
-It uses 32768 context, one slot, f16 K/V for target and draft, shared-weight
+It needs 25,820 MiB of free VRAM: the load peaked at 25,308 MiB (2026-11-15), plus
+the tray's 512 MiB headroom. It uses 32768 context, one slot, f16 K/V for target and draft, shared-weight
 `draft-mtp` depth 5, probabilistic draft sampling, four target/draft threads,
 batch/ubatch 512, Flash Attention, all GPU layers, GPU embeddings,
 `--fit off --load-mode none --no-host --jinja --reasoning-format deepseek --slots`.
@@ -66,6 +67,9 @@ rejected because their assets are not yet covered by the fingerprint.
 Re-measure it for a new model. Profiles never shrink to fit. GPU-only placement
 is checked from startup logs; MTP evidence is required only when MTP is configured.
 Missing files, insufficient VRAM, invalid flags and residency failures return 503.
+Insufficient VRAM has the error type `insufficient_vram`, both after the VRAM wait
+runs out and for requests refused at once while VRAM is still short, so a client can
+wait and send the request again. Every other failure has `server_error`.
 
 ## Status
 

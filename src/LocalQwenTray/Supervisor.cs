@@ -141,14 +141,19 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
             current = load is { IsCompleted: false } ? load : load = LoadAndRestore(manual, lifetime.Token);
         }
         await current.WaitAsync(ct);
-        if (!IsReady) throw new InvalidOperationException(controller.Status.StartsWith("Error: ") ? controller.Status["Error: ".Length..] : controller.Status);
+        if (!IsReady)
+        {
+            var error = controller.Status.StartsWith("Error: ") ? controller.Status["Error: ".Length..] : controller.Status;
+            // A shortage stays one, so the gateway can tell clients the request may go again once VRAM frees.
+            throw controller.LastShortage is { } shortage ? new InsufficientVramException(shortage.FreeMiB, shortage.NeedMiB, error) : new InvalidOperationException(error);
+        }
         lock (sync) LastActivity = now();
     }
     // Restores the conversation saved at the last unload, but only into an engine this load actually started.
     async Task LoadAndRestore(bool manual, CancellationToken ct)
     {
         if (VramGaveUp && !manual && host is not null && !await host.Fits(ct))
-            throw new InvalidOperationException("Not enough free VRAM for Local Qwen (still short after waiting). Free VRAM, then retry or click Load now.");
+            throw new InsufficientVramException(controller.LastShortage?.FreeMiB ?? 0, controller.LastShortage?.NeedMiB ?? 0, "Not enough free VRAM for Local Qwen (still short after waiting). Free VRAM, then retry or click Load now.");
         VramGaveUp = false;
         await controller.Start(ct);
         if (!IsReady && controller.LastShortage is { } shortage) await WaitForVram(shortage, ct);

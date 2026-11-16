@@ -118,7 +118,10 @@ internal static class GatewayTests
         {
             var text = await r.Content.ReadAsStringAsync();
             SelfTests.Check("a load that cannot fit returns a clear 503 instead of hanging", r.StatusCode == HttpStatusCode.ServiceUnavailable && text.Contains("VRAM"));
+            SelfTests.Check("a VRAM shortage has its own error type, so clients can wait and retry", text.Contains("\"type\":\"insufficient_vram\""));
         }
+        using (var r = await client.SendAsync(Req(HttpMethod.Post, "/v1/chat/completions", "{}")))
+            SelfTests.Check("a request while VRAM is still short is refused at once with the same type", r.StatusCode == HttpStatusCode.ServiceUnavailable && (await r.Content.ReadAsStringAsync()).Contains("\"type\":\"insufficient_vram\""));
         var profileHost = new TestHost();
         var profiles = new AppConfig();
         var profileSupervisor = new Supervisor(new Controller(profileHost), host: profileHost);
