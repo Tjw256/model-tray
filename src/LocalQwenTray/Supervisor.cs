@@ -90,6 +90,9 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
     public DateTimeOffset? VramWaitUntil { get; private set; }            // set while requests wait for VRAM
     public bool VramGaveUp { get; private set; }                         // the last wait ran out: refuse quietly
     public bool IsReady => controller.Status.StartsWith("Ready");
+    int loads;
+    // Counts loads that ended ready (including a switch to another profile), so per-load work runs once per engine.
+    public int Loads => Volatile.Read(ref loads);
     public TrayState State
     {
         get
@@ -157,6 +160,7 @@ internal sealed class Supervisor(Controller controller, Func<DateTimeOffset>? cl
         VramGaveUp = false;
         await controller.Start(ct);
         if (!IsReady && controller.LastShortage is { } shortage) await WaitForVram(shortage, ct);
+        if (IsReady) Interlocked.Increment(ref loads);
         if (host is not null && IsReady && controller.LastStartLaunched)
         {
             try { await host.RestoreSession(ct); } catch (Exception) when (!ct.IsCancellationRequested) { /* a lost cache only costs a re-read */ }

@@ -18,6 +18,9 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
     readonly HttpClient backend = new(new SocketsHttpHandler { UseProxy = false, AutomaticDecompression = DecompressionMethods.None, PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30) }) { Timeout = Timeout.InfiniteTimeSpan };
     static readonly HashSet<string> HopHeaders = new(StringComparer.OrdinalIgnoreCase) { "Connection", "Keep-Alive", "Transfer-Encoding", "Upgrade", "Proxy-Connection", "TE", "Trailer", "Host", "Authorization", "Content-Length" };
     string ModelsCachePath => Path.Combine(stateDirectory, "models-cache.json");
+    readonly DiscoveryAnswers discovery = new(Path.Combine(stateDirectory, "discovery-cache.json"));
+    int discoveryLoad = -1;
+    const string DefaultProfile = "default";
 
     public async Task StartAsync()
     {
@@ -71,6 +74,16 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
             return;
         }
         if (modelList && !supervisor.IsReady) { await Json(ctx, 200, CachedModels()); return; } // listing never wakes the GPU
+        // Discovery probes never wake the GPU or switch profiles. A GET names no model, so it is answered for the default
+        // profile, which is what such a GET used to load.
+        if (HttpMethods.IsGet(ctx.Request.Method) && DiscoveryAnswers.Paths.Contains(path))
+        {
+            var answer = discovery.Get(DefaultProfile, path);
+            ctx.Response.StatusCode = answer.Status;
+            ctx.Response.ContentType = answer.ContentType;
+            await ctx.Response.WriteAsync(answer.Body);
+            return;
+        }
         byte[]? requestBody = null;
         string? profile = null;
         if (ctx.Request.ContentLength > 0 || ctx.Request.Headers.TransferEncoding.Count > 0)
@@ -97,7 +110,11 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         }
         catch (Exception ex) { log?.Invoke("On-demand load failed: " + ex.Message); await Error(ctx, 503, "Local Qwen could not load: " + ex.Message, "server_error"); return; }
         using (lease)
-        try { await Forward(ctx, path, modelList, requestBody, profile is null); }
+        try
+        {
+            await RememberDiscovery(profile ?? DefaultProfile);
+            await Forward(ctx, path, modelList, requestBody, profile is null);
+        }
         catch (Exception ex) when (ex is HttpRequestException or IOException)
         {
             // Backend vanished (crash or external stop): refresh state so the next request reloads.
@@ -151,6 +168,31 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         }
         if (whole is not null && response.IsSuccessStatusCode) TryWrite(ModelsCachePath, whole.ToArray());
         if (response.IsSuccessStatusCode) RecordTimings(tail.Text());
+    }
+
+    // Once per load, while this request's lease holds the profile in place, ask the engine the discovery paths and keep
+    // its answers for that profile. A path the engine could not answer keeps its previous answer.
+    async Task RememberDiscovery(string profile)
+    {
+        int load = supervisor.Loads;
+        if (Interlocked.Exchange(ref discoveryLoad, load) == load) return;
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var fresh = new Dictionary<string, DiscoveryAnswer>();
+        foreach (var path in DiscoveryAnswers.Paths)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:{backendPort}{path}");
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
+                using var response = await backend.SendAsync(request, deadline.Token);
+                // 404 is the engine's real answer for a path it doesn't have; other errors are transient.
+                if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.NotFound)
+                    fresh[path] = new((int)response.StatusCode, response.Content.Headers.ContentType?.ToString() ?? DiscoveryAnswers.NotFound.ContentType, await response.Content.ReadAsStringAsync(deadline.Token));
+            }
+            catch (Exception ex) when (ex is HttpRequestException or IOException or OperationCanceledException) { log?.Invoke($"Discovery answer for {path} not refreshed: {ex.Message}"); }
+        }
+        if (fresh.Count > 0) discovery.Remember(profile, fresh);
+        else Interlocked.CompareExchange(ref discoveryLoad, -1, load);   // nothing answered: try again on the next request
     }
 
     // Thinking text is the slow part of Qwen3.8 output, so the tray sets the thinking effort (low/medium/xhigh) and

@@ -34,7 +34,7 @@ Ollama and plain llama.cpp ran at about the same speed. The gain comes from sett
         ▼
  ┌─────────────────────────────── Model Tray (starts with Windows) ───────────────────────────────┐
  │ gateway on :8000 ── first request? ──► start llama-server, wait until ready (~20 s), then stream │
- │                   ── /v1/models, /health ──► answered without loading anything                  │
+ │                   ── /v1/models, /health, /props ──► answered without loading anything          │
  │                   ── idle for N minutes ──► stop llama-server, VRAM freed                       │
  └──────────────────────────────────────────────┬──────────────────────────────────────────────────┘
                                                 ▼
@@ -42,7 +42,7 @@ Ollama and plain llama.cpp ran at about the same speed. The gain comes from sett
                          (loads the model files Ollama already downloaded)
 ```
 
-- **Always listening, loaded on demand.** The tray starts at login and holds port 8000. The first real request starts `llama-server`; the request waits about 20–25 s for the load and then streams normally. After the idle timeout (default 5 min; 1/5/15/30/60 min or never) the model is unloaded. Model-list and health requests never wake the GPU, and several first requests at once share a single load.
+- **Always listening, loaded on demand.** The tray starts at login and holds port 8000. The first real request starts `llama-server`; the request waits about 20–25 s for the load and then streams normally. After the idle timeout (default 5 min; 1/5/15/30/60 min or never) the model is unloaded. Model-list and health requests never wake the GPU, and several first requests at once share a single load. Neither do the server-type probes some clients send before any message (`GET /props`, `/v1/props`, `/api/tags`, `/api/v1/models`, `/version`; Hermes Agent asks them for every new session): the tray answers them with what `llama-server` itself answered at its last load (kept per profile in `discovery-cache.json`), or with `llama-server`'s 404 for a path it has never been asked. They always describe the default model.
 - **Uses Ollama's downloads in place.** It reads Ollama's manifests and loads the GGUF blobs directly, so nothing is copied or converted and Ollama keeps working. Every downloaded tag of the configured model (e.g. `q5_K_M`, `q4_K_M`) appears as a choice in the tray.
 - **Vision.** If the Ollama model includes a vision projector, it is loaded with `--mmproj`, so image input works.
 - **Reasoning: Low / Medium / High.** Qwen3.8's *thinking* text is the slowest part of its output: MTP accepts only about 30% of drafted tokens there, versus 70–90% in answers, so thinking runs at about 70–100 tok/s and answers at 125–160. The tray adds the chosen effort to each chat request (default **Low**, measured 10–20% faster than the template default *xhigh*). It also drops earlier turns' thinking from the history, as Qwen's official template does, so long conversations grow more slowly. Switching takes effect on the next message, with no reload. Clients that set `reasoning_effort` or `preserve_thinking` themselves are never overridden.
