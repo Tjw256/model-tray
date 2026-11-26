@@ -112,7 +112,8 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
         using (lease)
         try
         {
-            await RememberDiscovery(profile ?? DefaultProfile);
+            // Only the default profile's answers are ever served, so exact-profile requests (Savannah's) skip the capture.
+            if (profile is null) await RememberDiscovery(DefaultProfile);
             await Forward(ctx, path, modelList, requestBody, profile is null);
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException)
@@ -171,13 +172,15 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
     }
 
     // Once per load, while this request's lease holds the profile in place, ask the engine the discovery paths and keep
-    // its answers for that profile. A path the engine could not answer keeps its previous answer.
+    // its answers for that profile. A path the engine could not answer (timeout, dropped connection) keeps its previous
+    // answer, and the next request on the same load asks again, so one slow reply can't leave /props stale for a whole load.
     async Task RememberDiscovery(string profile)
     {
         int load = supervisor.Loads;
         if (Interlocked.Exchange(ref discoveryLoad, load) == load) return;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         var fresh = new Dictionary<string, DiscoveryAnswer>();
+        bool unanswered = false;
         foreach (var path in DiscoveryAnswers.Paths)
         {
             try
@@ -189,10 +192,10 @@ internal sealed class Gateway(Supervisor supervisor, string key, int publicPort,
                 if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.NotFound)
                     fresh[path] = new((int)response.StatusCode, response.Content.Headers.ContentType?.ToString() ?? DiscoveryAnswers.NotFound.ContentType, await response.Content.ReadAsStringAsync(deadline.Token));
             }
-            catch (Exception ex) when (ex is HttpRequestException or IOException or OperationCanceledException) { log?.Invoke($"Discovery answer for {path} not refreshed: {ex.Message}"); }
+            catch (Exception ex) when (ex is HttpRequestException or IOException or OperationCanceledException) { unanswered = true; log?.Invoke($"Discovery answer for {path} not refreshed: {ex.Message}"); }
         }
         if (fresh.Count > 0) discovery.Remember(profile, fresh);
-        else Interlocked.CompareExchange(ref discoveryLoad, -1, load);   // nothing answered: try again on the next request
+        if (unanswered) Interlocked.CompareExchange(ref discoveryLoad, -1, load);
     }
 
     // Thinking text is the slow part of Qwen3.8 output, so the tray sets the thinking effort (low/medium/xhigh) and

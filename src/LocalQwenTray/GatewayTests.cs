@@ -17,6 +17,7 @@ internal static class GatewayTests
         string? backendAuth = null, backendBody = null;
         Action? crashBackend = null;
         string propsTag = "first";   // which engine answered /props, to tell remembered answers apart
+        int propsCalls = 0;          // how often the engine itself was asked /props
         string J(string json, string effort = "low") => Encoding.UTF8.GetString(Gateway.ApplyThinkingDefaults(Encoding.UTF8.GetBytes(json), effort));
         SelfTests.Check("thinking defaults added to a plain chat request", J("{\"messages\":[]}") == "{\"messages\":[],\"chat_template_kwargs\":{\"reasoning_effort\":\"low\",\"preserve_thinking\":false}}");
         SelfTests.Check("client's own reasoning effort is never overridden", J("{\"chat_template_kwargs\":{\"reasoning_effort\":\"xhigh\"}}").Contains("\"reasoning_effort\":\"xhigh\"") && !J("{\"reasoning_effort\":\"medium\"}").Contains("\"low\""));
@@ -33,7 +34,7 @@ internal static class GatewayTests
         {
             backendAuth = ctx.Request.Headers.Authorization.ToString();
             // Shaped like llama-server b11517: /props exists, the other discovery paths are unknown (404).
-            if (ctx.Request.Path == "/props") { ctx.Response.ContentType = "application/json; charset=utf-8"; await ctx.Response.WriteAsync("{\"default_generation_settings\":{\"n_ctx\":131072},\"engine\":\"" + propsTag + "\"}"); return; }
+            if (ctx.Request.Path == "/props") { Interlocked.Increment(ref propsCalls); ctx.Response.ContentType = "application/json; charset=utf-8"; await ctx.Response.WriteAsync("{\"default_generation_settings\":{\"n_ctx\":131072},\"engine\":\"" + propsTag + "\"}"); return; }
             if (DiscoveryAnswers.Paths.Contains(ctx.Request.Path.Value)) { ctx.Response.StatusCode = 404; ctx.Response.ContentType = "application/json; charset=utf-8"; await ctx.Response.WriteAsync("{\"error\":{\"message\":\"File Not Found\",\"type\":\"not_found_error\",\"code\":404}}"); return; }
             if (ctx.Request.Path == "/v1/models") { await ctx.Response.WriteAsync("{\"data\":[{\"id\":\"" + Policy.Model + "\",\"meta\":{\"n_ctx\":131072},\"live\":true}]}"); return; }
             var body = await new StreamReader(ctx.Request.Body).ReadToEndAsync();
@@ -138,6 +139,23 @@ internal static class GatewayTests
             using var restartClient = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{restartPort}"), Timeout = TimeSpan.FromSeconds(20) };
             SelfTests.Check("remembered discovery answers survive a tray restart", EngineAnswers(await Discover(restartClient), "first") && host.UpCalls == 1);
         }
+        // A damaged or hand-edited answers file: unreadable JSON, missing fields or an impossible status.
+        foreach (var damaged in new[] { "{not json", "{\"default\":{\"/props\":{\"Status\":200}}}", "{\"default\":{\"/props\":{\"Status\":7,\"ContentType\":\"x\",\"Body\":\"y\"}}}", "{\"default\":null}" })
+        {
+            var damagedDir = Path.Combine(Path.GetTempPath(), "localqwen-gw-" + Guid.NewGuid());
+            Directory.CreateDirectory(damagedDir);
+            File.WriteAllText(Path.Combine(damagedDir, "discovery-cache.json"), damaged);
+            int damagedPort = FreePort();
+            await using (var damagedGateway = new Gateway(supervisor, key, damagedPort, backendPort, damagedDir, null, () => effort))
+            {
+                await damagedGateway.StartAsync();
+                using var damagedClient = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{damagedPort}"), Timeout = TimeSpan.FromSeconds(20) };
+                var seen = await Discover(damagedClient);
+                SelfTests.Check($"a damaged answers file ({damaged}) gives llama-server's 404 and loads nothing",
+                    seen.Values.All(x => x.Status == HttpStatusCode.NotFound && x.Body.Contains("not_found_error")) && host.UpCalls == 1 && !supervisor.IsReady);
+            }
+            try { Directory.Delete(damagedDir, true); } catch (IOException) { }
+        }
         propsTag = "second";
         int before = host.UpCalls;
         var parallel = Enumerable.Range(0, 3).Select(_ => client.SendAsync(Req(HttpMethod.Post, "/v1/chat/completions", "{}"))).ToArray();
@@ -147,6 +165,22 @@ internal static class GatewayTests
         SelfTests.Check("remembered discovery answers refresh when the engine loads again", EngineAnswers(await Discover(client), "second"));
         foreach (var a in answers) a.Dispose();
         supervisor.IdleTimeout = null;
+        {
+            // While a load is under way, probes are answered at once and join no load.
+            await supervisor.Unload(default);
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.DelayHook = async ct => { await gate.Task.WaitAsync(ct); host.Health = new(true); };
+            int loadsBefore = host.UpCalls;
+            var loading = client.SendAsync(Req(HttpMethod.Post, "/v1/chat/completions", "{}"));
+            for (int i = 0; i < 200 && host.UpCalls == loadsBefore; i++) await Task.Delay(10);
+            var during = await Discover(client);
+            SelfTests.Check("while a load is under way, discovery is answered from memory and starts no second engine",
+                EngineAnswers(during, "second") && host.UpCalls == loadsBefore + 1 && !loading.IsCompleted && !supervisor.IsReady);
+            gate.SetResult();
+            using var loaded = await loading;
+            host.DelayHook = null;
+            SelfTests.Check("the generation request waiting on that load is answered", loaded.IsSuccessStatusCode && supervisor.IsReady && host.UpCalls == loadsBefore + 1);
+        }
         await supervisor.Unload(default);
         host.Free = 1000;
         using (var r = await client.SendAsync(Req(HttpMethod.Post, "/v1/chat/completions", "{}")))
@@ -174,6 +208,7 @@ internal static class GatewayTests
         {
             string json = "{ \"model\": \"savannah-extraction\", \"max_tokens\": 8192, \"reasoning_effort\": \"high\", \"reasoning\": {\"budget\": 4000}, \"chat_template_kwargs\": {\"enable_thinking\": true} }";
             propsTag = "extraction";
+            propsCalls = 0;
             var pending = profileClient.SendAsync(Req(HttpMethod.Post, "/v1/chat/completions", json));
             await Task.Delay(50);
             SelfTests.Check("profile switch does not stop an in-flight SSE response", !pending.IsCompleted && profileHost.StopCalls == 0);
@@ -183,8 +218,8 @@ internal static class GatewayTests
             SelfTests.Check("thinking controls and max_tokens pass through byte-for-byte", backendBody == json);
         }
         SelfTests.Check("discovery while extraction is loaded neither switches profiles nor answers with extraction's engine",
-            EngineAnswers(await Discover(profileClient), "second") && profileHost.StopCalls == 1 && profileHost.UpCalls == 2 && profileHost.SelectedProfile == "savannah-extraction"
-            && File.ReadAllText(Path.Combine(profileDir, "discovery-cache.json")).Contains("savannah-extraction"));
+            EngineAnswers(await Discover(profileClient), "second") && profileHost.StopCalls == 1 && profileHost.UpCalls == 2 && profileHost.SelectedProfile == "savannah-extraction");
+        SelfTests.Check("Savannah's extraction requests send the engine no discovery requests", propsCalls == 0 && !File.ReadAllText(Path.Combine(profileDir, "discovery-cache.json")).Contains("savannah-extraction"));
         const string retry = "{\"model\":\"savannah-extraction\",\"chat_template_kwargs\":{\"enable_thinking\":false},\"max_tokens\":256}";
         using (var result = await profileClient.SendAsync(Req(HttpMethod.Post, "/v1/chat/completions", retry)))
             SelfTests.Check("thinking-off retry stays on the same exact profile", result.IsSuccessStatusCode && backendBody == retry && profileHost.UpCalls == 2);

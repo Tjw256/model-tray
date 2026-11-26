@@ -13,10 +13,13 @@ internal sealed class DiscoveryAnswers(string file)
     readonly object sync = new();
     Dictionary<string, Dictionary<string, DiscoveryAnswer>>? byProfile;
 
+    // A hand-edited or damaged file can hold entries with missing fields or an impossible status; those are served as
+    // the 404 instead of failing the response.
     public DiscoveryAnswer Get(string profile, string path)
     {
-        lock (sync) return Loaded().TryGetValue(profile, out var answers) && answers?.TryGetValue(path, out var answer) == true && answer is not null ? answer : NotFound;
+        lock (sync) return Loaded().TryGetValue(profile, out var answers) && answers?.TryGetValue(path, out var answer) == true && Usable(answer) ? answer : NotFound;
     }
+    public static bool Usable([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] DiscoveryAnswer? answer) => answer is { ContentType: not null, Body: not null } && (answer.Status is >= 200 and <= 299 or 404);
     // Paths missing from a fresh capture (the engine was unreachable for them) keep their previous answer.
     public void Remember(string profile, IReadOnlyDictionary<string, DiscoveryAnswer> fresh)
     {
