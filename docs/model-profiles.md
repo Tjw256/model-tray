@@ -111,6 +111,9 @@ is using, or wait in the tray and hold up everyone else's requests.
 `state` is `sleeping`, `loading`, `unloading`, `ready`, `busy` or `error`. `in_flight` includes
 requests waiting for admission/loading. `free_vram_mib: null` means the GPU poll
 failed, never zero free memory. Status and profile listing never load the GPU.
+Neither do the discovery probes `GET /props`, `/v1/props`, `/api/tags`, `/api/v1/models`
+and `/version`: they carry no model name, so they are answered with the default profile's
+answers from its last load, never with an exact profile's, and never switch profiles.
 
 ## Fingerprints
 
